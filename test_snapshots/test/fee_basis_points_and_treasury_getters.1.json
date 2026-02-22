@@ -91,6 +91,14 @@
                       },
                       {
                         "key": {
+                          "symbol": "last_act"
+                        },
+                        "val": {
+                          "u64": 0
+                        }
+                      },
+                      {
+                        "key": {
                           "symbol": "members"
                         },
                         "val": {
@@ -103,6 +111,14 @@
                         },
                         "val": {
                           "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                        }
+                      },
+                      {
+                        "key": {
+                          "symbol": "usr_bal"
+                        },
+                        "val": {
+                          "map": []
                         }
                       }
                     ]

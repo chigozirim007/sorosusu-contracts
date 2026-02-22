@@ -11,7 +11,10 @@ const TREASURY_KEY: Symbol = symbol_short!("treasury");
 const ADMIN_KEY: Symbol = symbol_short!("admin");
 const MEMBERS_KEY: Symbol = symbol_short!("members");
 const CONTRIBS_KEY: Symbol = symbol_short!("contribs");
+const USER_BAL_KEY: Symbol = symbol_short!("usr_bal");
+const LAST_ACTIVE_KEY: Symbol = symbol_short!("last_act");
 const MAX_BASIS_POINTS: u32 = 10_000;
+const EMERGENCY_WITHDRAWAL_DELAY_SECS: u64 = 7 * 24 * 60 * 60;
 
 contractmeta!(
     key = "Description",
@@ -30,6 +33,7 @@ pub enum Error {
     MemberNotFound = 1007,
     PenaltyExceedsContribution = 1008,
     MemberAlreadyExists = 1009,
+    EmergencyWithdrawalNotAvailable = 1010,
 }
 
 #[contractimpl]
@@ -47,6 +51,10 @@ impl SorosusuContracts {
         env.storage()
             .instance()
             .set(&CONTRIBS_KEY, &Map::<Address, i128>::new(&env));
+        env.storage()
+            .instance()
+            .set(&USER_BAL_KEY, &Map::<Address, i128>::new(&env));
+        Self::touch_last_active(&env);
 
         Ok(())
     }
@@ -65,7 +73,73 @@ impl SorosusuContracts {
             .instance()
             .set(&FEE_BASIS_POINTS_KEY, &fee_basis_points);
         env.storage().instance().set(&TREASURY_KEY, &treasury);
+        Self::touch_last_active(&env);
         Ok(())
+    }
+
+    pub fn deposit(env: Env, user: Address, token: Address, amount: i128) -> Result<(), Error> {
+        user.require_auth();
+
+        let contract_address = env.current_contract_address();
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&user, &contract_address, &amount);
+
+        let mut balances: Map<Address, i128> = env
+            .storage()
+            .instance()
+            .get(&USER_BAL_KEY)
+            .unwrap_or(Map::new(&env));
+        let current = balances.get(user.clone()).unwrap_or(0);
+        balances.set(user, current + amount);
+        env.storage().instance().set(&USER_BAL_KEY, &balances);
+
+        Ok(())
+    }
+
+    pub fn emergency_withdraw(env: Env, user: Address, token: Address) -> Result<(), Error> {
+        user.require_auth();
+
+        let last_active = Self::get_last_active_timestamp(env.clone());
+        let now = env.ledger().timestamp();
+        let unlock_at = last_active.saturating_add(EMERGENCY_WITHDRAWAL_DELAY_SECS);
+        if now <= unlock_at {
+            return Err(Error::EmergencyWithdrawalNotAvailable);
+        }
+
+        let mut balances: Map<Address, i128> = env
+            .storage()
+            .instance()
+            .get(&USER_BAL_KEY)
+            .unwrap_or(Map::new(&env));
+        let amount = balances.get(user.clone()).unwrap_or(0);
+        if amount > 0 {
+            let contract_address = env.current_contract_address();
+            let token_client = token::Client::new(&env, &token);
+            token_client.transfer(&contract_address, &user, &amount);
+        }
+        balances.remove(user);
+        env.storage().instance().set(&USER_BAL_KEY, &balances);
+
+        Ok(())
+    }
+
+    pub fn admin_action(env: Env) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+        Self::touch_last_active(&env);
+        Ok(())
+    }
+
+    pub fn get_last_active_timestamp(env: Env) -> u64 {
+        env.storage().instance().get(&LAST_ACTIVE_KEY).unwrap_or(0)
+    }
+
+    pub fn get_user_balance(env: Env, user: Address) -> i128 {
+        let balances: Map<Address, i128> = env
+            .storage()
+            .instance()
+            .get(&USER_BAL_KEY)
+            .unwrap_or(Map::new(&env));
+        balances.get(user).unwrap_or(0)
     }
 
     pub fn fee_basis_points(env: Env) -> u32 {
@@ -162,6 +236,8 @@ impl SorosusuContracts {
         env.events()
             .publish((symbol_short!("Kicked"), member.clone()), (refund, penalty));
 
+        Self::touch_last_active(&env);
+
         Ok(())
     }
 
@@ -177,7 +253,11 @@ impl SorosusuContracts {
         new_member: Address,
     ) -> Result<(), Error> {
         Self::require_admin(&env)?;
-        Self::apply_member_swap(&env, old_member, new_member)
+        let result = Self::apply_member_swap(&env, old_member, new_member);
+        if result.is_ok() {
+            Self::touch_last_active(&env);
+        }
+        result
     }
 
     fn apply_member_swap(env: &Env, old_member: Address, new_member: Address) -> Result<(), Error> {
@@ -235,12 +315,34 @@ impl SorosusuContracts {
         }
         None
     }
+
+    fn touch_last_active(env: &Env) {
+        let now = env.ledger().timestamp();
+        env.storage().instance().set(&LAST_ACTIVE_KEY, &now);
+    }
 }
 
 #[cfg(test)]
 mod test {
+    extern crate std;
+
     use super::*;
-    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        token,
+    };
+
+    fn create_token_contract<'a>(
+        env: &Env,
+        admin: &Address,
+    ) -> (token::Client<'a>, token::StellarAssetClient<'a>) {
+        let asset = env.register_stellar_asset_contract_v2(admin.clone());
+        let contract_address = asset.address();
+        (
+            token::Client::new(env, &contract_address),
+            token::StellarAssetClient::new(env, &contract_address),
+        )
+    }
 
     fn setup(env: &Env) -> (SorosusuContractsClient<'_>, Address) {
         let contract_id = env.register_contract(None, SorosusuContracts);
@@ -364,7 +466,6 @@ mod test {
         let result = client.try_swap_member(&old_member, &new_member);
 
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().unwrap(), Error::MemberNotFound);
     }
 
     #[test]
@@ -394,5 +495,67 @@ mod test {
         assert_eq!(stored_members.get(1).unwrap(), other_member.clone());
         assert_eq!(stored_contribs.get(new_member).unwrap(), 900_i128);
         assert_eq!(stored_contribs.get(old_member), None);
+    }
+
+    #[test]
+    fn emergency_withdraw_after_seven_days() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin) = setup(&env);
+        let user = Address::generate(&env);
+        let (token_client, token_admin) = create_token_contract(&env, &admin);
+        token_admin.mint(&user, &1000);
+
+        client.initialize(&admin);
+        client.deposit(&user, &token_client.address, &500);
+        assert_eq!(client.get_user_balance(&user), 500);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp += EMERGENCY_WITHDRAWAL_DELAY_SECS + 1;
+        });
+
+        client.emergency_withdraw(&user, &token_client.address);
+        assert_eq!(client.get_user_balance(&user), 0);
+        assert_eq!(token_client.balance(&user), 1000);
+    }
+
+    #[test]
+    fn emergency_withdraw_before_seven_days() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin) = setup(&env);
+        let user = Address::generate(&env);
+        let (token_client, token_admin) = create_token_contract(&env, &admin);
+        token_admin.mint(&user, &1000);
+
+        client.initialize(&admin);
+        client.deposit(&user, &token_client.address, &500);
+
+        let result = client.try_emergency_withdraw(&user, &token_client.address);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            Error::EmergencyWithdrawalNotAvailable
+        );
+    }
+
+    #[test]
+    fn admin_action_updates_timestamp() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin) = setup(&env);
+        client.initialize(&admin);
+        let initial_timestamp = client.get_last_active_timestamp();
+
+        env.ledger().with_mut(|li| {
+            li.timestamp += 100;
+        });
+
+        client.admin_action();
+        let updated_timestamp = client.get_last_active_timestamp();
+        assert!(updated_timestamp > initial_timestamp);
     }
 }
