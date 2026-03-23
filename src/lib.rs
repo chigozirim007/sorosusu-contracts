@@ -56,6 +56,17 @@ pub enum DataKey {
     CollateralVault(Address, u64),
     CollateralConfig(u64),
     DefaultedMembers(u64),
+    MemberAtIndex(u64, u32),
+    Reputation(Address),
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Reputation {
+    pub cycles_completed: u32,
+    pub total_contributions: u32,
+    pub on_time_contributions: u32,
+    pub total_volume: i128,
 }
 
 #[contracttype]
@@ -174,6 +185,9 @@ pub trait SoroSusuTrait {
     fn slash_collateral(env: Env, caller: Address, circle_id: u64, member: Address);
     fn release_collateral(env: Env, caller: Address, circle_id: u64, member: Address);
     fn mark_member_defaulted(env: Env, caller: Address, circle_id: u64, member: Address);
+
+    // Oracle function
+    fn get_reliability_score(env: Env, user: Address) -> u32;
 }
 
 // --- IMPLEMENTATION ---
@@ -287,6 +301,9 @@ impl SoroSusuTrait for SoroSusu {
             }
         }
 
+        // Store member by index for the circle
+        env.storage().instance().set(&DataKey::MemberAtIndex(circle_id, circle.member_count), &user);
+
         let new_member = Member {
             address: user.clone(),
             index: circle.member_count,
@@ -377,6 +394,22 @@ impl SoroSusuTrait for SoroSusu {
         
         env.storage().instance().set(&member_key, &member);
         env.storage().instance().set(&DataKey::Circle(circle_id), &circle);
+
+        // Update Reputation
+        let rep_key = DataKey::Reputation(user.clone());
+        let mut rep: Reputation = env.storage().instance().get(&rep_key).unwrap_or(Reputation {
+            cycles_completed: 0,
+            total_contributions: 0,
+            on_time_contributions: 0,
+            total_volume: 0,
+        });
+
+        rep.total_contributions += 1;
+        rep.total_volume += base_amount;
+        if current_time <= circle.deadline_timestamp {
+            rep.on_time_contributions += 1;
+        }
+        env.storage().instance().set(&rep_key, &rep);
     }
 
     fn finalize_round(env: Env, caller: Address, circle_id: u64) {
@@ -397,10 +430,17 @@ impl SoroSusuTrait for SoroSusu {
             panic!("Not all contributed");
         }
 
-        // recipient is circle.current_recipient_index
-        // We'll need a way to get member by index or store member addresses in circle.
-        // For simplicity in this clean version, let's assume members are stored in a predictable way or we add member_addresses to CircleInfo.
-        // Actually, let's use the bitmap and iterate to find the address if needed, or better, store it in storage under (circle_id, index)
+        let mut circle = circle;
+        circle.is_round_finalized = true;
+        
+        // Set recipient for this round
+        let recipient: Address = env.storage().instance().get(&DataKey::MemberAtIndex(circle_id, circle.current_recipient_index)).expect("Recipient not found");
+        circle.current_pot_recipient = Some(recipient);
+
+        // Schedule payout (for simplicity, now)
+        env.storage().instance().set(&DataKey::ScheduledPayoutTime(circle_id), &env.ledger().timestamp());
+        
+        env.storage().instance().set(&DataKey::Circle(circle_id), &circle);
     }
 
     fn claim_pot(env: Env, user: Address, circle_id: u64) {
@@ -445,6 +485,20 @@ impl SoroSusuTrait for SoroSusu {
                             env.storage().instance().set(&collateral_key, &collateral_info);
                         }
                     }
+                }
+            }
+        }
+
+        // Update Reputation: Increment cycles completed if member has finished their course
+        let member_key = DataKey::Member(user.clone());
+        if let Some(member_info) = env.storage().instance().get::<DataKey, Member>(&member_key) {
+            if member_info.contribution_count >= circle.max_members {
+                let rep_key = DataKey::Reputation(user.clone());
+                if let Some(mut rep) = env.storage().instance().get::<DataKey, Reputation>(&rep_key) {
+                    // Only increment once per cycle. We can check if it was already incremented if we want, but since they only claim pot once, it's fine.
+                    // Actually they might claim pot once but the check here might be triggered multiple times if claim_pot was called multiple times (but current logic prevents that)
+                    rep.cycles_completed += 1;
+                    env.storage().instance().set(&rep_key, &rep);
                 }
             }
         }
@@ -691,5 +745,43 @@ impl SoroSusuTrait for SoroSusu {
             // Reuse slash_collateral logic
             Self::slash_collateral(env, caller, circle_id, member);
         }
+    }
+
+    fn get_reliability_score(env: Env, user: Address) -> u32 {
+        let rep_key = DataKey::Reputation(user.clone());
+        let rep: Reputation = env.storage().instance().get(&rep_key).unwrap_or(Reputation {
+            cycles_completed: 0,
+            total_contributions: 0,
+            on_time_contributions: 0,
+            total_volume: 0,
+        });
+
+        if rep.total_contributions == 0 {
+            return 0;
+        }
+
+        // Weights:
+        // 40% - On-time contribution ratio
+        // 30% - Total cycles completed (capped at 10 cycles for max points)
+        // 30% - Total volume rotated (capped at 10,000 units for max points)
+
+        let on_time_ratio = (rep.on_time_contributions * 400) / rep.total_contributions;
+        
+        let cycles_score = if rep.cycles_completed >= 10 {
+            300
+        } else {
+            rep.cycles_completed * 30
+        };
+
+        // Assuming 7 decimals for volume normalization (e.g. 1000 XLM = 10,000,000,0 units)
+        // Max volume points at 10,000 XLM
+        let normalized_volume = (rep.total_volume / 1_000_000_0) as u32;
+        let volume_score = if normalized_volume >= 10000 {
+            300
+        } else {
+            (normalized_volume * 300) / 10000
+        };
+
+        on_time_ratio + cycles_score + volume_score
     }
 }
