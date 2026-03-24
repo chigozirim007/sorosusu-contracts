@@ -48,6 +48,7 @@ fn test_reliability_score_oracle() {
     
     let amount: i128 = 1000_000_000; // 100 units
     let circle_id = client.create_circle(&user, &amount, &2, &token_id, &86400, &0, &nft_id, &0);
+    let circle_id = client.create_circle(&user, &amount, &2, &token_id, &86400, &0, &nft_id);
     
     client.join_circle(&user, &circle_id, &1, &None);
     client.join_circle(&other_user, &circle_id, &1, &None);
@@ -109,6 +110,7 @@ fn test_badge_minting_after_long_cycle() {
     let cycle_duration: u64 = 180 * 24 * 60 * 60; 
     let max_members = 2;
     let circle_id = client.create_circle(&creator, &amount, &max_members, &token_id, &cycle_duration, &0, &nft_id, &0);
+    let circle_id = client.create_circle(&creator, &amount, &max_members, &token_id, &cycle_duration, &0, &nft_id);
     
     let user1 = creator.clone();
     let user2 = Address::generate(&env);
