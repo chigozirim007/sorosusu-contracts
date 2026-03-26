@@ -1,7 +1,5 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractclient, contractimpl, contracttype, contracterror,
-    symbol_short, token, Address, Env, String, Symbol, Vec,
     contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, token,
     Address, Env, String, Symbol, Vec,
 };
@@ -26,7 +24,9 @@ pub enum Error {
     InsufficientInsurance = 12,
     InsuranceAlreadyUsed = 13,
     RateLimitExceeded = 14,
-
+    InvalidBasketWeights = 15,
+    BasketNotEnabled = 16,
+    InvalidBasketRatio = 17,
 }
 
 // --- CONSTANTS ---
@@ -90,27 +90,19 @@ pub enum DataKey {
     ProtocolFeeBps,
     ProtocolTreasury,
     CollateralVault(Address, u64),
-    UserStats(Address),
     ReputationData(Address),
     SocialCapital(Address, u64),
-    ProtocolFeeBps,
-    ProtocolTreasury,
     AuditCount,
     AuditEntry(u64),
     AuditAll,
     AuditByActor(Address),
     AuditByResource(u64),
-    SocialCapital(Address, u64),
     LeniencyStats(u64),
     Proposal(u64),
     DefaultedMembers(u64),
     RolloverBonus(u64),
     RolloverVote(u64, Address),
-    CollateralVault(Address, u64),
-    DefaultedMembers(u64),
-    LeniencyStats(u64),
     LeniencyRequest(u64),
-    Proposal(u64),
     VotingPower(Address, u64),
     DissolutionProposal(u64),
     RefundClaim(u64),
@@ -120,8 +112,11 @@ pub enum DataKey {
     GroupTreasury(u64),
     PathPayment(u64),
     PathPaymentVote(u64, Address),
-    DexRegistry,
-    SupportedTokens,
+    DexRegistry(Address),
+    SupportedTokens(Address),
+    // Multi-asset basket storage
+    BasketConfig(u64),
+    BasketAssetContrib(u64, Address, Address),
 }
 
 #[contracttype]
@@ -459,6 +454,14 @@ pub struct DexInfo {
     pub last_updated: u64,
 }
 
+/// A single asset slot in a multi-asset basket with its allocation weight.
+#[contracttype]
+#[derive(Clone)]
+pub struct AssetWeight {
+    pub token: Address,
+    pub weight_bps: u32, // Allocation in basis points (e.g., 5000 = 50%)
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct RolloverBonus {
@@ -626,8 +629,6 @@ pub struct CircleInfo {
     pub requires_collateral: bool,
     pub collateral_bps: u32,
     pub member_addresses: Vec<Address>,
-    pub member_addresses: Vec<Address>,
-    pub requires_collateral: bool,
     pub leniency_enabled: bool,
     pub grace_period_end: Option<u64>,
     pub quadratic_voting_enabled: bool,
@@ -639,13 +640,10 @@ pub struct CircleInfo {
     pub recovery_old_address: Option<Address>,
     pub recovery_new_address: Option<Address>,
     pub recovery_votes_bitmap: u64,
-    pub quadratic_voting_enabled: bool,
     pub arbitrator: Address,
-    pub grace_period_end: u64,
-    pub proposal_count: u32,
-    pub leniency_enabled: bool,
-    pub dissolution_status: u32,
-    pub dissolution_deadline: u64,
+    /// Multi-asset basket: None for single-token circles, Some(...) for basket circles.
+    /// Each AssetWeight specifies a token address and its allocation in basis points.
+    pub basket: Option<Vec<AssetWeight>>,
 }
 
 // --- CONTRACT CLIENTS ---
@@ -765,6 +763,23 @@ pub trait SoroSusuTrait {
 
     // Inter-contract reputation query interface
     fn get_reputation(env: Env, user: Address) -> ReputationData;
+
+    // Multi-Asset Reserve Currency Basket
+    fn create_basket_circle(
+        env: Env,
+        creator: Address,
+        amount: i128,
+        max_members: u32,
+        basket_assets: Vec<Address>,
+        basket_weights: Vec<u32>,
+        cycle_duration: u64,
+        insurance_fee_bps: u32,
+        nft_contract: Address,
+        arbitrator: Address,
+    ) -> u64;
+
+    fn deposit_basket(env: Env, user: Address, circle_id: u64);
+    fn get_basket_config(env: Env, circle_id: u64) -> Vec<AssetWeight>;
 }
 
 // --- IMPLEMENTATION ---
@@ -800,12 +815,6 @@ fn write_audit(env: &Env, actor: &Address, action: AuditAction, resource_id: u64
         (symbol_short!("AUDIT"), actor.clone(), resource_id),
         (audit_count, entry.timestamp),
     );
-}
-
-fn append_audit_index(env: &Env, index_key: DataKey, audit_id: u64) {
-    let mut index: Vec<u64> = env.storage().instance().get(&index_key).unwrap_or(Vec::new(env));
-    index.push_back(audit_id);
-    env.storage().instance().set(&index_key, &index);
 }
 
 fn calculate_rollover_bonus(env: &Env, circle_id: u64, fee_percentage_bps: u32) -> i128 {
@@ -1170,8 +1179,6 @@ impl SoroSusuTrait for SoroSusu {
             requires_collateral,
             collateral_bps,
             member_addresses: Vec::new(&env),
-            member_addresses: Vec::new(&env),
-            requires_collateral,
             leniency_enabled: true,
             grace_period_end: None,
             quadratic_voting_enabled: max_members >= MIN_GROUP_SIZE_FOR_QUADRATIC,
@@ -1183,13 +1190,8 @@ impl SoroSusuTrait for SoroSusu {
             recovery_old_address: None,
             recovery_new_address: None,
             recovery_votes_bitmap: 0,
-            quadratic_voting_enabled: max_members >= MIN_GROUP_SIZE_FOR_QUADRATIC,
             arbitrator,
-            grace_period_end: 0,
-            proposal_count: 0,
-            leniency_enabled: true,
-            dissolution_status: 0,
-            dissolution_deadline: 0,
+            basket: None,
         };
 
         env.storage()
@@ -1399,19 +1401,19 @@ impl SoroSusuTrait for SoroSusu {
         let next_recipient = get_member_address_by_index(&circle, next_recipient_index);
         
         circle.current_recipient_index = next_recipient_index;
-        circle.current_pot_recipient = Some(next_recipient);
-        
+        circle.current_pot_recipient = Some(next_recipient.clone());
+
         // Schedule payout time (end of month from now)
         let current_time = env.ledger().timestamp();
         let payout_time = current_time + (30 * 24 * 60 * 60); // 30 days from now
         env.storage().instance().set(&DataKey::ScheduledPayoutTime(circle_id), &payout_time);
-        
+
         // Reset for next round
         circle.contribution_bitmap = 0;
         circle.deadline_timestamp = current_time + circle.cycle_duration;
-        
+
         env.storage().instance().set(&DataKey::Circle(circle_id), &circle);
-        
+
         // Publish round finalization event
         env.events().publish(
             (Symbol::new(&env, "ROUND_FINALIZED"), circle_id),
@@ -1470,17 +1472,60 @@ impl SoroSusuTrait for SoroSusu {
             }
         }
         
-        let token_client = token::Client::new(&env, &circle.token);
-        
         let fee_bps: u32 = env.storage().instance().get(&DataKey::ProtocolFeeBps).unwrap_or(0);
-        if fee_bps > 0 {
-            let treasury: Address = env.storage().instance().get(&DataKey::ProtocolTreasury).expect("Treasury not set");
-            let fee = (total_payout * fee_bps as i128) / 10000;
-            let net_payout = total_payout - fee;
-            token_client.transfer(&env.current_contract_address(), &treasury, &fee);
-            token_client.transfer(&env.current_contract_address(), &user, &net_payout);
+
+        if let Some(ref basket) = circle.basket.clone() {
+            // Basket circle: distribute each asset to the winner proportionally
+            let maybe_treasury: Option<Address> = if fee_bps > 0 {
+                env.storage().instance().get(&DataKey::ProtocolTreasury)
+            } else {
+                None
+            };
+
+            for i in 0..basket.len() {
+                let asset_weight = basket.get(i).unwrap();
+                // Total pot for this asset = contribution_amount * member_count * weight / 10000
+                let asset_pot = (circle.contribution_amount
+                    * (circle.member_count as i128)
+                    * asset_weight.weight_bps as i128)
+                    / 10000;
+
+                let token_client = token::Client::new(&env, &asset_weight.token);
+
+                if fee_bps > 0 {
+                    let treasury = maybe_treasury
+                        .clone()
+                        .expect("Treasury not set");
+                    let fee = (asset_pot * fee_bps as i128) / 10000;
+                    let net = asset_pot - fee;
+                    token_client.transfer(&env.current_contract_address(), &treasury, &fee);
+                    token_client.transfer(&env.current_contract_address(), &user, &net);
+                } else {
+                    token_client.transfer(&env.current_contract_address(), &user, &asset_pot);
+                }
+            }
+
+            env.events().publish(
+                (Symbol::new(&env, "BASKET_POT_CLAIMED"), circle_id, user.clone()),
+                (basket.len(), circle.member_count),
+            );
         } else {
-            token_client.transfer(&env.current_contract_address(), &user, &total_payout);
+            // Single-token circle (original logic)
+            let token_client = token::Client::new(&env, &circle.token);
+
+            if fee_bps > 0 {
+                let treasury: Address = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::ProtocolTreasury)
+                    .expect("Treasury not set");
+                let fee = (total_payout * fee_bps as i128) / 10000;
+                let net_payout = total_payout - fee;
+                token_client.transfer(&env.current_contract_address(), &treasury, &fee);
+                token_client.transfer(&env.current_contract_address(), &user, &net_payout);
+            } else {
+                token_client.transfer(&env.current_contract_address(), &user, &total_payout);
+            }
         }
 
         // Auto-release collateral if member has completed all contributions
@@ -2652,7 +2697,7 @@ impl SoroSusuTrait for SoroSusu {
         payment.slippage_bps = slippage_bps;
 
         // Deposit target tokens to circle
-        let circle: CircleInfo = env.storage().instance().get(&DataKey::Circle(circle_id))
+        let mut circle: CircleInfo = env.storage().instance().get(&DataKey::Circle(circle_id))
             .expect("Circle not found");
         
         let token_client = token::Client::new(&env, &payment.target_token);
@@ -2721,7 +2766,7 @@ impl SoroSusuTrait for SoroSusu {
         let current_time = env.ledger().timestamp();
         let supported_token = SupportedToken {
             token_address: token_address.clone(),
-            token_symbol,
+            token_symbol: token_symbol.clone(),
             decimals,
             is_stable,
             is_active: true,
@@ -2749,7 +2794,7 @@ impl SoroSusuTrait for SoroSusu {
         let current_time = env.ledger().timestamp();
         let dex_info = DexInfo {
             dex_address: dex_address.clone(),
-            dex_name,
+            dex_name: dex_name.clone(),
             supported_pairs: Vec::new(&env),
             is_trusted,
             is_active: true,
@@ -2764,6 +2809,246 @@ impl SoroSusuTrait for SoroSusu {
             (Symbol::new(&env, "DEX_REGISTERED"), dex_address),
             (dex_name, is_trusted),
         );
+    }
+
+    fn create_basket_circle(
+        env: Env,
+        creator: Address,
+        amount: i128,
+        max_members: u32,
+        basket_assets: Vec<Address>,
+        basket_weights: Vec<u32>,
+        cycle_duration: u64,
+        insurance_fee_bps: u32,
+        nft_contract: Address,
+        arbitrator: Address,
+    ) -> u64 {
+        creator.require_auth();
+
+        if max_members == 0 {
+            panic!("Max members must be greater than zero");
+        }
+
+        // Validate basket has at least 2 assets
+        if basket_assets.len() < 2 {
+            panic!("Basket must contain at least 2 assets");
+        }
+        if basket_assets.len() != basket_weights.len() {
+            panic!("basket_assets and basket_weights must have the same length");
+        }
+
+        // Validate weights sum to exactly 10000 bps
+        let mut total_weight: u32 = 0;
+        for i in 0..basket_weights.len() {
+            total_weight = total_weight
+                .checked_add(basket_weights.get(i).unwrap())
+                .expect("Weight overflow");
+        }
+        if total_weight != 10000 {
+            panic!("Basket weights must sum to exactly 10000 bps (100%)");
+        }
+
+        // Rate limit check
+        let current_time = env.ledger().timestamp();
+        let rate_limit_key = DataKey::LastCreatedTimestamp(creator.clone());
+        if let Some(last_created) = env.storage().instance().get::<DataKey, u64>(&rate_limit_key) {
+            if current_time < last_created + RATE_LIMIT_SECONDS {
+                panic!("Rate limit exceeded");
+            }
+        }
+        env.storage().instance().set(&rate_limit_key, &current_time);
+
+        let mut circle_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CircleCount)
+            .unwrap_or(0);
+        circle_count += 1;
+
+        // Build AssetWeight basket vec
+        let mut basket: Vec<AssetWeight> = Vec::new(&env);
+        for i in 0..basket_assets.len() {
+            basket.push_back(AssetWeight {
+                token: basket_assets.get(i).unwrap(),
+                weight_bps: basket_weights.get(i).unwrap(),
+            });
+        }
+
+        // Determine collateral requirements based on total cycle value
+        let total_cycle_value = amount * (max_members as i128);
+        let requires_collateral = total_cycle_value >= HIGH_VALUE_THRESHOLD;
+        let collateral_bps = if requires_collateral { DEFAULT_COLLATERAL_BPS } else { 0 };
+
+        // Primary token is the first basket asset (for legacy single-token compatibility)
+        let primary_token = basket_assets.get(0).unwrap();
+
+        let new_circle = CircleInfo {
+            id: circle_count,
+            creator,
+            contribution_amount: amount,
+            max_members,
+            member_count: 0,
+            current_recipient_index: 0,
+            is_active: true,
+            token: primary_token,
+            deadline_timestamp: current_time + cycle_duration,
+            cycle_duration,
+            contribution_bitmap: 0,
+            insurance_balance: 0,
+            insurance_fee_bps,
+            is_insurance_used: false,
+            late_fee_bps: 100,
+            nft_contract,
+            is_round_finalized: false,
+            current_pot_recipient: None,
+            requires_collateral,
+            collateral_bps,
+            member_addresses: Vec::new(&env),
+            leniency_enabled: true,
+            grace_period_end: None,
+            quadratic_voting_enabled: max_members >= MIN_GROUP_SIZE_FOR_QUADRATIC,
+            proposal_count: 0,
+            dissolution_status: DissolutionStatus::NotInitiated,
+            dissolution_deadline: None,
+            proposed_late_fee_bps: 0,
+            proposal_votes_bitmap: 0,
+            recovery_old_address: None,
+            recovery_new_address: None,
+            recovery_votes_bitmap: 0,
+            arbitrator,
+            basket: Some(basket),
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Circle(circle_count), &new_circle);
+        env.storage()
+            .instance()
+            .set(&DataKey::CircleCount, &circle_count);
+
+        env.events().publish(
+            (Symbol::new(&env, "BASKET_CIRCLE_CREATED"), circle_count),
+            (amount, max_members),
+        );
+
+        circle_count
+    }
+
+    fn deposit_basket(env: Env, user: Address, circle_id: u64) {
+        user.require_auth();
+
+        let mut circle: CircleInfo = env
+            .storage()
+            .instance()
+            .get(&DataKey::Circle(circle_id))
+            .expect("Circle not found");
+
+        // Ensure this is a basket circle
+        let basket = match circle.basket.clone() {
+            Some(b) => b,
+            None => panic!("Not a basket circle; use deposit() for single-asset circles"),
+        };
+
+        let member_key = DataKey::Member(user.clone());
+        let mut member: Member = env
+            .storage()
+            .instance()
+            .get(&member_key)
+            .expect("Member not found");
+
+        if member.status != MemberStatus::Active {
+            panic!("Member is not active");
+        }
+
+        let current_time = env.ledger().timestamp();
+        let base_amount = circle.contribution_amount * member.tier_multiplier as i128;
+
+        // Determine whether contribution is late (for stats tracking)
+        let is_late = current_time > circle.deadline_timestamp;
+
+        // Transfer the correct ratio of each basket asset from the user
+        for i in 0..basket.len() {
+            let asset_weight = basket.get(i).unwrap();
+
+            // Required amount for this asset = base_amount * weight / 10000
+            let asset_amount = (base_amount * asset_weight.weight_bps as i128) / 10000;
+            if asset_amount <= 0 {
+                panic!("Asset amount too small for current basket weight");
+            }
+
+            // Add insurance fee proportionally
+            let insurance_fee = (asset_amount * circle.insurance_fee_bps as i128) / 10000;
+            let total_asset_amount = asset_amount + insurance_fee;
+
+            // Transfer asset from user to contract
+            let token_client = token::Client::new(&env, &asset_weight.token);
+            token_client.transfer(&user, &env.current_contract_address(), &total_asset_amount);
+
+            // Accumulate insurance balance (tracked in primary token equivalent)
+            if insurance_fee > 0 {
+                circle.insurance_balance += insurance_fee;
+            }
+
+            // Track per-asset contribution for payout distribution
+            let contrib_key = DataKey::BasketAssetContrib(
+                circle_id,
+                user.clone(),
+                asset_weight.token.clone(),
+            );
+            let prev_amount: i128 = env
+                .storage()
+                .instance()
+                .get(&contrib_key)
+                .unwrap_or(0);
+            env.storage()
+                .instance()
+                .set(&contrib_key, &(prev_amount + asset_amount));
+        }
+
+        // Update user statistics
+        let user_stats_key = DataKey::UserStats(user.clone());
+        let mut user_stats: UserStats = env
+            .storage()
+            .instance()
+            .get(&user_stats_key)
+            .unwrap_or(UserStats {
+                total_volume_saved: 0,
+                on_time_contributions: 0,
+                late_contributions: 0,
+            });
+
+        if is_late {
+            user_stats.late_contributions += 1;
+        } else {
+            user_stats.on_time_contributions += 1;
+        }
+        user_stats.total_volume_saved += base_amount;
+        env.storage().instance().set(&user_stats_key, &user_stats);
+
+        // Mark member as having contributed this round via bitmap
+        member.contribution_count += 1;
+        member.last_contribution_time = current_time;
+        circle.contribution_bitmap |= 1u64 << member.index;
+
+        env.storage().instance().set(&member_key, &member);
+        env.storage().instance().set(&DataKey::Circle(circle_id), &circle);
+
+        env.events().publish(
+            (Symbol::new(&env, "BASKET_DEPOSIT"), circle_id, user.clone()),
+            (basket.len(), base_amount),
+        );
+    }
+
+    fn get_basket_config(env: Env, circle_id: u64) -> Vec<AssetWeight> {
+        let circle: CircleInfo = env
+            .storage()
+            .instance()
+            .get(&DataKey::Circle(circle_id))
+            .expect("Circle not found");
+        match circle.basket {
+            Some(b) => b,
+            None => panic!("Circle does not have a basket configuration"),
+        }
     }
 }
 
