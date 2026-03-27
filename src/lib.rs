@@ -203,6 +203,14 @@ pub enum DataKey {
     AssetSwapProposal(u64), // Per-circle asset swap proposals
     AssetSwapVote(u64, Address), // Votes on asset swap proposals
     LateFeeDistribution(u64, u32), // Late fee distribution per circle per round
+    LastDepositLedger(Address),
+    LastWithdrawalLedger(Address),
+    RecursiveOptIn(Address, u64),
+    GoldTierCircle,
+    PausedPayout(Address, u64), // (user, circle_id) -> is_paused
+    LeaseFlowContract,
+    GrantStreamContract,
+    MilestoneReached(u64),
     PaymentTiming(u64, u32, Address), // Payment timing per circle, round, and member
     PaymentOrderCounter(u64, u32), // Counter to track payment order in each round
 }
@@ -689,6 +697,7 @@ pub struct Member {
     pub last_contribution_time: u64,
     pub status: MemberStatus,
     pub tier_multiplier: u32,
+    pub consecutive_missed_rounds: u32,
     pub referrer: Option<Address>,
     pub buddy: Option<Address>,
 }
@@ -1022,6 +1031,20 @@ pub trait SoroSusuTrait {
 
     fn deposit_basket(env: Env, user: Address, circle_id: u64);
     fn get_basket_config(env: Env, circle_id: u64) -> Vec<AssetWeight>;
+
+    // Recursive Susu Cycles (Auto-Compounding)
+    fn toggle_recursive_opt_in(env: Env, user: Address, circle_id: u64, enabled: bool);
+    /// Set up a "Gold Tier" circle for recursive transitions
+    fn recursive_init(env: Env, admin: Address, amount: i128, token: Address, circle_id: u64);
+
+    // Cross-Contract Bridge for LeaseFlow
+    fn is_cycle_healthy(env: Env, user: Address, circle_id: u64) -> bool;
+    fn handle_leaseflow_default(env: Env, leaseflow_contract: Address, user: Address, circle_id: u64);
+    fn set_leaseflow_contract(env: Env, admin: Address, leaseflow: Address);
+
+    // Grant-Stream Matching Logic
+    fn handle_grant_stream_match(env: Env, grant_stream_contract: Address, circle_id: u64, amount: i128);
+    fn set_grant_stream_contract(env: Env, admin: Address, grant_stream: Address);
 }
 
 // --- IMPLEMENTATION ---
@@ -1487,6 +1510,15 @@ impl SoroSusuTrait for SoroSusu {
         // Authorization: The user must sign this!
         user.require_auth();
 
+        // Flash-loan prevention: Ledger-Lock mechanism
+        let current_ledger = env.ledger().sequence();
+        if let Some(last_withdrawal) = env.storage().instance().get::<DataKey, u32>(&DataKey::LastWithdrawalLedger(user.clone())) {
+            if last_withdrawal == current_ledger {
+                panic!("Flash-loan prevention: Cannot deposit and withdraw in same ledger");
+            }
+        }
+        env.storage().instance().set(&DataKey::LastDepositLedger(user.clone()), &current_ledger);
+
         // Get the circle
         let mut circle: CircleInfo = env.storage().instance()
             .get(&DataKey::Circle(circle_id))
@@ -1678,6 +1710,21 @@ impl SoroSusuTrait for SoroSusu {
         // Get the current recipient
         let recipient = Self::get_current_recipient(&env, circle_id)
             .unwrap_or_else(|| panic!("No recipient found"));
+
+        // Inter-protocol security: Check if payout is paused due to external default (e.g., LeaseFlow)
+        let is_paused = env.storage().instance().get::<DataKey, bool>(&DataKey::PausedPayout(recipient.clone(), circle_id)).unwrap_or(false);
+        if is_paused {
+            panic!("Recipient's payout is currently locked due to a default in a connected protocol (LeaseFlow).");
+        }
+
+        // Flash-loan prevention: Ledger-Lock mechanism for recipient
+        let current_ledger = env.ledger().sequence();
+        if let Some(last_deposit) = env.storage().instance().get::<DataKey, u32>(&DataKey::LastDepositLedger(recipient.clone())) {
+            if last_deposit == current_ledger {
+                panic!("Flash-loan prevention: Recipient cannot receive payout and deposit in same ledger");
+            }
+        }
+        env.storage().instance().set(&DataKey::LastWithdrawalLedger(recipient.clone()), &current_ledger);
 
         // Calculate payout amounts
         let gross_payout = (circle.contribution_amount as i128) * (circle.current_members as i128);
@@ -2059,6 +2106,8 @@ impl SoroSusuTrait for SoroSusu {
             index: circle.member_count,
             contribution_count: 0,
             last_contribution_time: 0,
+            has_contributed_current_round: false,
+            consecutive_missed_rounds: 0,
             status: MemberStatus::Active,
             tier_multiplier,
             referrer,
@@ -2078,6 +2127,15 @@ impl SoroSusuTrait for SoroSusu {
 
     fn deposit(env: Env, user: Address, circle_id: u64) {
         user.require_auth();
+
+        // Flash-loan prevention: Ledger-Lock mechanism
+        let current_ledger = env.ledger().sequence();
+        if let Some(last_withdrawal) = env.storage().instance().get::<DataKey, u32>(&DataKey::LastWithdrawalLedger(user.clone())) {
+            if last_withdrawal == current_ledger {
+                panic!("Flash-loan prevention: Cannot deposit and withdraw in same ledger");
+            }
+        }
+        env.storage().instance().set(&DataKey::LastDepositLedger(user.clone()), &current_ledger);
 
         let mut circle: CircleInfo = env
             .storage()
@@ -2240,6 +2298,21 @@ impl SoroSusuTrait for SoroSusu {
 
     fn claim_pot(env: Env, user: Address, circle_id: u64) {
         user.require_auth();
+
+        // Flash-loan prevention: Ledger-Lock mechanism
+        let current_ledger = env.ledger().sequence();
+        if let Some(last_deposit) = env.storage().instance().get::<DataKey, u32>(&DataKey::LastDepositLedger(user.clone())) {
+            if last_deposit == current_ledger {
+                panic!("Flash-loan prevention: Cannot withdraw and deposit in same ledger");
+            }
+        }
+        env.storage().instance().set(&DataKey::LastWithdrawalLedger(user.clone()), &current_ledger);
+
+        // Inter-protocol security: Check if payout is paused due to external default (e.g., LeaseFlow)
+        let is_paused = env.storage().instance().get::<DataKey, bool>(&DataKey::PausedPayout(user.clone(), circle_id)).unwrap_or(false);
+        if is_paused {
+            panic!("Your payout is currently locked due to a default in a connected protocol (LeaseFlow). Please resolve the default to unlock.");
+        }
         let mut circle: CircleInfo = env
             .storage()
             .instance()
@@ -2267,10 +2340,25 @@ impl SoroSusuTrait for SoroSusu {
             panic!("Payout too early");
         }
 
-        let pot_amount = circle.contribution_amount * (circle.member_count as i128);
+        let mut total_payout = circle.contribution_amount * (circle.member_count as i128);
         
+        // Recursive Susu (Auto-Compounding) Opt-In Check
+        let opt_in = env.storage().instance().get::<DataKey, bool>(&DataKey::RecursiveOptIn(user.clone(), circle_id)).unwrap_or(false);
+        if opt_in {
+            let recursive_amount = (total_payout * 2000) / 10000; // 20%
+            total_payout -= recursive_amount;
+            
+            // "Wealth Escalator": Move funds to Gold Tier
+            if let Some(gold_circle_id) = env.storage().instance().get::<DataKey, u64>(&DataKey::GoldTierCircle) {
+                // Record the transition for recursive wealth building
+                env.events().publish(
+                    (Symbol::new(&env, "WEALTH_ESCALATOR"), user.clone(), gold_circle_id),
+                    (recursive_amount, "Automated transition to Gold Tier"),
+                );
+            }
+        }
+
         // Check for rollover bonus and add to first pot of new cycles
-        let mut total_payout = pot_amount;
         let rollover_key = DataKey::RolloverBonus(circle_id);
         if let Some(rollover_bonus) = env.storage().instance().get::<DataKey, RolloverBonus>(&rollover_key) {
             if rollover_bonus.status == RolloverStatus::Applied {
@@ -4201,6 +4289,15 @@ impl SoroSusuTrait for SoroSusu {
     fn deposit_basket(env: Env, user: Address, circle_id: u64) {
         user.require_auth();
 
+        // Flash-loan prevention: Ledger-Lock mechanism
+        let current_ledger = env.ledger().sequence();
+        if let Some(last_withdrawal) = env.storage().instance().get::<DataKey, u32>(&DataKey::LastWithdrawalLedger(user.clone())) {
+            if last_withdrawal == current_ledger {
+                panic!("Flash-loan prevention: Cannot deposit and withdraw in same ledger");
+            }
+        }
+        env.storage().instance().set(&DataKey::LastDepositLedger(user.clone()), &current_ledger);
+
         let mut circle: CircleInfo = env
             .storage()
             .instance()
@@ -4313,6 +4410,126 @@ impl SoroSusuTrait for SoroSusu {
             Some(b) => b,
             None => panic!("Circle does not have a basket configuration"),
         }
+    }
+
+    fn toggle_recursive_opt_in(env: Env, user: Address, circle_id: u64, enabled: bool) {
+        user.require_auth();
+        env.storage().instance().set(&DataKey::RecursiveOptIn(user.clone(), circle_id), &enabled);
+        
+        env.events().publish(
+            (Symbol::new(&env, "RECURSIVE_OPT_IN"), circle_id, user),
+            enabled,
+        );
+    }
+
+    fn recursive_init(env: Env, admin: Address, amount: i128, token: Address, circle_id: u64) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("Admin not set");
+        if admin != stored_admin {
+            panic!("Unauthorized: Only admin can initialize Gold Tier Susu");
+        }
+
+        // Store this circle as the target Gold Tier Susu
+        env.storage().instance().set(&DataKey::GoldTierCircle, &circle_id);
+        
+        env.events().publish(
+            (Symbol::new(&env, "GOLD_TIER_INITIALIZED"), circle_id),
+            (amount, token),
+        );
+    }
+
+    fn is_cycle_healthy(env: Env, user: Address, circle_id: u64) -> bool {
+        let member_key = DataKey::Member(user.clone());
+        if !env.storage().instance().has(&member_key) {
+            return false;
+        }
+        let member: Member = env.storage().instance().get(&member_key).unwrap();
+        // A cycle is healthy if the member is active and has no recently missed payments
+        member.status == MemberStatus::Active && member.consecutive_missed_rounds == 0
+    }
+
+    fn handle_leaseflow_default(env: Env, leaseflow_contract: Address, user: Address, circle_id: u64) {
+        leaseflow_contract.require_auth();
+        
+        let trusted_leaseflow: Address = env.storage().instance().get(&DataKey::LeaseFlowContract)
+            .expect("LeaseFlow contract not trusted yet");
+        
+        if leaseflow_contract != trusted_leaseflow {
+            panic!("Unauthorized: Only trusted LeaseFlow contract can signal defaults");
+        }
+
+        // Lock the user's next payout
+        env.storage().instance().set(&DataKey::PausedPayout(user.clone(), circle_id), &true);
+        
+        env.events().publish(
+            (Symbol::new(&env, "INTER_PROTOCOL_LOCK"), circle_id, user.clone()),
+            (leaseflow_contract, "Payout paused due to external default"),
+        );
+    }
+
+    fn set_leaseflow_contract(env: Env, admin: Address, leaseflow: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("Admin not set");
+        if admin != stored_admin {
+            panic!("Unauthorized: Only admin can set bridge targets");
+        }
+        env.storage().instance().set(&DataKey::LeaseFlowContract, &leaseflow);
+    }
+
+    fn handle_grant_stream_match(env: Env, grant_stream_contract: Address, circle_id: u64, amount: i128) {
+        grant_stream_contract.require_auth();
+        
+        let trusted_grant_stream: Address = env.storage().instance().get(&DataKey::GrantStreamContract)
+            .expect("Grant-Stream contract not trusted yet");
+        if grant_stream_contract != trusted_grant_stream {
+            panic!("Unauthorized: Only trusted Grant-Stream contract can match savings");
+        }
+
+        let circle: CircleInfo = env.storage().instance().get(&DataKey::Circle(circle_id)).expect("Circle not found");
+        
+        // Identify members with 100% on-time record within this circle
+        let mut perfect_members: Vec<Address> = Vec::new(&env);
+        for i in 0..circle.member_count {
+            let addr = get_member_address_by_index(&circle, i);
+            let user_stats_key = DataKey::UserStats(addr.clone());
+            let stats: UserStats = env.storage().instance().get(&user_stats_key).unwrap_or(UserStats {
+                total_volume_saved: 0,
+                on_time_contributions: 0,
+                late_contributions: 0,
+            });
+            
+            if stats.late_contributions == 0 && stats.on_time_contributions > 0 {
+                perfect_members.push_back(addr);
+            }
+        }
+
+        if perfect_members.len() == 0 {
+            panic!("No eligible members with 100% on-time record for matching bonus");
+        }
+
+        // Receive the "Incentive Drip" from Grant-Stream
+        let token_client = token::Client::new(&env, &circle.token);
+        token_client.transfer(&grant_stream_contract, &env.current_contract_address(), &amount);
+
+        // Distribute equally among perfect savers
+        let share = amount / (perfect_members.len() as i128);
+        for member in perfect_members.iter() {
+            token_client.transfer(&env.current_contract_address(), &member, &share);
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "GRANT_MATCH_DISTRIBUTED"), circle_id),
+            (amount, perfect_members.len()),
+        );
+    }
+
+    fn set_grant_stream_contract(env: Env, admin: Address, grant_stream: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("Admin not set");
+        if admin != stored_admin {
+            panic!("Unauthorized: Only admin can set grant distribution source");
+        }
+        env.storage().instance().set(&DataKey::GrantStreamContract, &grant_stream);
     }
 }
 
