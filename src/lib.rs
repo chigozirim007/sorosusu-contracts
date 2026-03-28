@@ -6,6 +6,9 @@ pub use liquidity_buffer::*;
 mod sbt_minter;
 
 pub use lending_market::*;
+mod tranche_system;
+
+pub use tranche_system::*;
 
 // --- DATA STRUCTURES ---
 
@@ -160,6 +163,12 @@ pub enum Error {
     InvalidDepositMemo = 20,
     DepositAlreadyProcessed = 21,
     ComplianceCheckFailed = 22,
+    // Tranche-based payout errors
+    TrancheNotFound = 23,
+    TrancheNotUnlocked = 24,
+    TrancheAlreadyClaimed = 25,
+    MemberDefaulted = 26,
+    TrancheClawbackFailed = 27,
 }
 
 // --- CONSTANTS ---
@@ -223,6 +232,12 @@ const ASSET_SWAP_MAJORITY: u32 = 66; // 66% majority for asset swap approval
 const MAX_SLIPPAGE_TOLERANCE_BPS: u32 = 500; // 5% maximum slippage tolerance
 const MIN_PATH_PAYMENT_AMOUNT: i128 = 50_000_000; // Minimum 5 tokens for path payment
 const PATH_PAYMENT_TIMEOUT: u64 = 300; // 5 minutes timeout for path payment execution
+
+// Tranche-Based Payout Constants
+const TRANCHE_IMMEDIATE_PAYOUT_BPS: u32 = 7000; // 70% paid immediately
+const TRANCHE_LOCKED_PERCENTAGE_BPS: u32 = 3000; // 30% locked in tranches
+const TRANCHE_COUNT: u32 = 2; // Number of tranches for locked amount (2 rounds)
+const TRANCHE_CLAIM_GRACE_PERIOD: u64 = 2592000; // 30 days grace period to claim unlocked tranches
 
 // --- DATA STRUCTURES ---
 
@@ -312,6 +327,59 @@ pub enum DataKey {
     EmergencyLoan(u64),                 // Emergency loan requests
     RepaymentSchedule(u64),            // Loan repayment schedules
     LendingMarketStats,               // Lending market statistics
+    // Tranche-Based Payout System
+    TrancheSchedule(u64, Address),    // (circle_id, winner) -> Tranche schedule
+    MemberContributionRecord(u64, u32, Address), // (circle_id, round, member) -> Contribution record
+    DefaultedMember(u64, Address),    // (circle_id, member) -> Default status
+}
+
+// --- TRANCHE-BASED PAYOUT DATA STRUCTURES ---
+
+/// Tranche status for tracking payout phases
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum TrancheStatus {
+    Locked,      // Funds are time-locked
+    Unlocked,    // Funds are available for claim
+    Claimed,     // Funds have been claimed
+    ClawedBack,  // Funds clawed back due to default
+}
+
+/// Individual tranche information
+#[contracttype]
+#[derive(Clone)]
+pub struct TrancheInfo {
+    pub amount: i128,              // Amount locked in this tranche
+    pub unlock_round: u32,         // Round number when this tranche unlocks
+    pub unlock_timestamp: u64,     // Timestamp when this tranche unlocks
+    pub status: TrancheStatus,     // Current status of this tranche
+    pub created_at: u64,           // When this tranche was created
+    pub claimed_at: Option<u64>,   // When this tranche was claimed
+}
+
+/// Complete tranche schedule for a winner's pot
+#[contracttype]
+#[derive(Clone)]
+pub struct TrancheSchedule {
+    pub winner: Address,           // The member who won the pot
+    pub circle_id: u64,            // Circle identifier
+    pub total_pot: i128,           // Total pot amount
+    pub immediate_payout: i128,    // 70% paid immediately
+    pub tranches: Vec<TrancheInfo>, // Remaining 30% distributed in tranches
+    pub created_at: u64,           // When schedule was created
+    pub is_complete: bool,         // Whether all tranches have been claimed or clawed back
+}
+
+/// Member contribution tracking for tranche eligibility
+#[contracttype]
+#[derive(Clone)]
+pub struct MemberContributionRecord {
+    pub member: Address,
+    pub circle_id: u64,
+    pub round: u32,
+    pub contributed_on_time: bool,
+    pub contribution_timestamp: u64,
+    pub is_defaulted: bool,
 }
 
 #[contracttype]
@@ -1868,6 +1936,9 @@ impl SoroSusuTrait for SoroSusu {
         let current_time = env.ledger().timestamp();
         let is_on_time = current_time <= circle.deadline_timestamp;
         
+        // Record contribution for tranche eligibility tracking
+        tranche_system::record_contribution(&env, circle_id, &user, is_on_time);
+        
         // Get or initialize payment order counter for this round
         let mut payment_order_counter: u32 = env.storage().instance()
             .get(&DataKey::PaymentOrderCounter(circle_id, current_round))
@@ -2000,23 +2071,44 @@ impl SoroSusuTrait for SoroSusu {
         }
         env.storage().instance().set(&DataKey::LastWithdrawalLedger(recipient.clone()), &current_ledger);
 
-        // Calculate payout amounts
+        // Calculate total pot
         let gross_payout = (circle.contribution_amount as i128) * (circle.current_members as i128);
         let organizer_fee = (gross_payout * circle.organizer_fee_bps as i128) / 10_000;
         let net_payout = gross_payout - organizer_fee;
 
+        // TRANCHE-BASED PAYOUT: Split into immediate (70%) and locked tranches (30%)
+        let immediate_amount = (net_payout * TRANCHE_IMMEDIATE_PAYOUT_BPS as i128) / 10000;
+        
         // Check gas buffer and ensure sufficient funds for transaction
         Self::ensure_gas_buffer(&env, circle_id);
 
-        // Execute the payout with gas buffer protection
-        Self::execute_payout_with_gas_protection(
-            &env,
-            &circle,
+        // Execute immediate payout (70%)
+        let token_client = token::Client::new(&env, &circle.token);
+        token_client.transfer(
+            &env.current_contract_address(),
             &recipient,
-            &circle.creator,
-            net_payout,
-            organizer_fee,
-        ).expect("Payout execution failed");
+            &immediate_amount,
+        );
+
+        // Transfer organizer fee
+        if organizer_fee > 0 {
+            token_client.transfer(
+                &env.current_contract_address(),
+                &circle.creator,
+                &organizer_fee,
+            );
+        }
+
+        // Create tranche schedule for remaining 30%
+        let locked_amount = net_payout - immediate_amount;
+        if locked_amount > 0 {
+            // Store locked amount in contract (will be claimed via tranches)
+            // In production, track this separately to prevent double-spending
+            tranche_system::create_tranche_schedule(&env, &circle, &recipient, locked_amount);
+        }
+
+        // Record contribution for this round (for tranche eligibility)
+        tranche_system::record_contribution(&env, circle_id, &recipient, true);
 
         // Update circle state
         circle.current_round += 1;
@@ -2033,7 +2125,12 @@ impl SoroSusuTrait for SoroSusu {
         // Emit events
         env.events().publish(
             (Symbol::new(&env, "payout_distributed"), circle_id),
-            (recipient, net_payout),
+            (recipient.clone(), immediate_amount),
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "TRANCHE_SCHEDULE_CREATED"), circle_id, recipient.clone()),
+            (locked_amount, TRANCHE_COUNT, env.ledger().timestamp()),
         );
 
         if organizer_fee > 0 {
@@ -2131,6 +2228,66 @@ impl SoroSusuTrait for SoroSusu {
         let recipient_index = circle.current_round % (circle.current_members as u32);
         env.storage().instance()
             .get(&DataKey::MemberByIndex(circle_id, recipient_index))
+    }
+
+    // --- TRANCHE-BASED PAYOUT SYSTEM ---
+
+    fn claim_tranche(env: Env, member: Address, circle_id: u64, tranche_index: u32) {
+        member.require_auth();
+        
+        let result = tranche_system::claim_tranche(&env, &member, circle_id, tranche_index);
+        
+        match result {
+            Ok(amount) => {
+                env.events().publish(
+                    (Symbol::new(&env, "TRANCHE_CLAIM_SUCCESS"), circle_id, member.clone()),
+                    (amount, tranche_index),
+                );
+            }
+            Err(e) => {
+                panic!("Tranche claim failed: {:?}", e);
+            }
+        }
+    }
+
+    fn get_tranche_schedule(env: Env, circle_id: u64, winner: Address) -> Option<TrancheSchedule> {
+        env.storage().instance().get(&DataKey::TrancheSchedule(circle_id, winner))
+    }
+
+    fn mark_member_defaulted(env: Env, admin: Address, circle_id: u64, member: Address) {
+        admin.require_auth();
+        
+        let result = tranche_system::mark_member_defaulted(&env, &admin, circle_id, &member);
+        
+        match result {
+            Ok(_) => {
+                env.events().publish(
+                    (Symbol::new(&env, "MEMBER_DEFAULT_MARKED"), circle_id, member.clone()),
+                    (env.ledger().timestamp(), admin),
+                );
+            }
+            Err(e) => {
+                panic!("Failed to mark member defaulted: {:?}", e);
+            }
+        }
+    }
+
+    fn execute_tranche_clawback(env: Env, admin: Address, circle_id: u64, member: Address) {
+        admin.require_auth();
+        
+        let result = tranche_system::execute_tranche_clawback(&env, &admin, circle_id, &member);
+        
+        match result {
+            Ok(clawed_amount) => {
+                env.events().publish(
+                    (Symbol::new(&env, "TRANCHE_CLAWBACK_SUCCESS"), circle_id, member.clone()),
+                    (clawed_amount, env.ledger().timestamp()),
+                );
+            }
+            Err(e) => {
+                panic!("Tranche clawback failed: {:?}", e);
+            }
+        }
     }
 
     // --- STELLAR ANCHOR DIRECT DEPOSIT API (SEP-24/SEP-31) ---
