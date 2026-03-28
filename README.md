@@ -8,13 +8,82 @@ A trustless Rotating Savings and Credit Association (ROSCA) built on Stellar Sor
 
 ## Features
 - Create savings circles with fixed contribution amounts
-- Join existing circles
+- Join existing circles with flexible shares (1x or 2x contributions)
 - Deposit USDC/XLM securely
-- Automated payouts (Coming Soon)
+- Automated payouts with double rewards for 2-share members
+- Immutable audit log for sensitive actions
+- Family and small business friendly participation options
+
+## Audit Log
+
+Sensitive actions now write immutable on-chain audit entries with:
+- actor
+- action
+- timestamp
+- resource_id
+
+Current action coverage in this contract:
+- Governance proposal creation
+- Governance voting
+- Social recovery proposal creation
+- Social recovery voting and execution
+- Admin actions such as member ejection, insurance coverage, lending pool changes, and round finalization
+
+Audit entries are stored in append-only contract storage and emitted as AUDIT events. The contract also maintains secondary indexes for querying by actor and resource.
+
+### Query Methods
+
+- `get_audit_entry(id)`
+- `query_audit_by_actor(actor, start_time, end_time, offset, limit)`
+- `query_audit_by_resource(resource_id, start_time, end_time, offset, limit)`
+- `query_audit_by_time(start_time, end_time, offset, limit)`
+
+### Query Semantics
+
+- Time bounds are inclusive
+- Results are returned in insertion order
+- Queries are paginated with `offset` and `limit`
+- Maximum page size is capped in-contract to avoid oversized responses
+
+## Protocol fee (monetization)
+
+The protocol takes a configurable fee from every payout (e.g. 0.5%).
+
+- **fee_basis_points**: Fee rate in basis points (e.g. `50` = 0.5%). Set via `set_protocol_fee` (admin only). Capped at 10,000 (100%).
+- **treasury_address**: Recipient of the fee. Set together with the fee; required when fee &gt; 0.
+- Payouts deduct the fee from the payout amount: the recipient receives `payout_amount - fee`, and the fee is transferred to `treasury_address`.
+
+After deploy, call `initialize(admin)` once, then `set_protocol_fee(fee_basis_points, treasury)` to enable fees. When implementing the payout flow, use `compute_and_transfer_payout(env, token, from, recipient, gross_payout)` so every payout is fee-deducted and the fee is sent to the treasury.
+
+## Shares Feature
+
+The SoroSusu protocol now supports flexible shares, allowing members to participate at different contribution levels:
+
+### Standard Shares (1 Share)
+- Contribute the standard amount each cycle
+- Receive the standard pot payout
+- Ideal for individual participants
+
+### Double Shares (2 Shares)  
+- Contribute 2x the standard amount each cycle
+- Receive 2x the pot payout
+- Perfect for families or small businesses
+
+### Example
+```
+Circle: 100 USDC contribution, 3 members
+- Member A (1 share): contributes 100 USDC, receives 400 USDC pot
+- Member B (2 shares): contributes 200 USDC, receives 800 USDC pot  
+- Member C (1 share): contributes 100 USDC, receives 400 USDC pot
+Total pot: 400 USDC (based on 4 total shares)
+```
+
+This makes SoroSusu a one-size-fits-all tool for communal finance, accommodating both individual savers and larger entities within the same cycle.
 
 ## How to Build
 ```bash
 cargo build --target wasm32-unknown-unknown --release
+```
 
 ## Troubleshooting
 
@@ -30,6 +99,7 @@ Code	Error	Description
 1003	AlreadyJoined	Member already part of circle
 1004	CircleNotFound	Invalid circle ID
 1005	Unauthorized	Caller not permitted to perform action
+1006	InvalidFeeConfig	Fee basis points &gt; 10,000 or treasury not set when fee &gt; 0
 1️⃣ Cycle Not Complete
 
 Error: CycleNotComplete
@@ -93,3 +163,5 @@ Resolution:
 Verify admin or member role
 
 Ensure correct signing address
+
+check enforecd and verified,but upload on different branch comment
