@@ -547,6 +547,7 @@ dependencies = [
  "libc",
  "r-efi 5.3.0",
  "wasip2",
+ "wasip3",
 ]
 
 [[package]]
@@ -1463,6 +1464,7 @@ name = "sorosusu-contracts"
 version = "0.1.0"
 dependencies = [
  "arbitrary",
+ "derive_arbitrary",
  "proptest",
  "soroban-sdk",
 ]
