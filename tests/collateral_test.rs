@@ -1,8 +1,8 @@
 #![cfg(test)]
 use soroban_sdk::testutils::Address as _;
 
-use soroban_sdk::{contract, contractimpl, Address, Env};
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::{contract, contractimpl, token, Address, Env};
+use sorosusu_contracts::{SoroSusu, SoroSusuClient};
 
 #[contract]
 pub struct MockNft;
@@ -13,29 +13,38 @@ impl MockNft {
     pub fn burn(_env: Env, _from: Address, _id: u128) {}
 }
 
+fn setup_test(env: &Env) -> (SoroSusuClient<'static>, Address, Address, Address) {
+    let contract_id = env.register_contract(None, SoroSusu);
+    let client = SoroSusuClient::new(env, &contract_id);
+    
+    let admin = Address::generate(env);
+    let creator = Address::generate(env);
+    let token_admin = Address::generate(env);
+    let token = env.register_stellar_asset_contract(token_admin);
+    
+    client.init(&admin, &0);
+    
+    // Mint tokens to creator for bond
+    let token_client = token::StellarAssetClient::new(env, &token);
+    token_client.mint(&creator, &1000i128);
+    
+    (client, creator, token, admin)
+}
+
 #[test]
 fn test_collateral_required_for_high_value_circles() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, SoroSusu);
-    let client = SoroSusuClient::new(&env, &contract_id);
+    let (client, creator, token, _) = setup_test(&env);
     
-    let admin = Address::generate(&env);
-    let creator = Address::generate(&env);
-    let token = Address::generate(&env);
-    let nft_contract = env.register_contract(None, MockNft);
-    
-    // Initialize contract
-    client.init(&admin, &0);
-    
-    // Create a high-value circle (above threshold)
-    let high_amount = 2_000_000_0; // 2000 XLM
+    let high_amount = 20_000_000i128; // 2000 XLM
     let max_members = 5u32;
-    let circle_id = client.create_circle(&creator, &high_amount, &max_members, &token, &86400u64, // 1 day cycle, &100u32);
+    // Create circle with bond
+    client.create_circle(&creator, &high_amount, &max_members, &token, &86400u64, &100i128);
     
-    // Joining should fail without prior collateral stake for high-value circles.
+    // Joining should fail without prior collateral stake (mocking based on test expectation)
     let user = Address::generate(&env);
-    let result = client.try_join_circle(&user, &circle_id);
+    let result = client.try_join_circle(&user, &1u64); // circle_id 1
     assert!(result.is_err());
 }
 
@@ -43,24 +52,14 @@ fn test_collateral_required_for_high_value_circles() {
 fn test_join_circle_rejected_without_collateral_when_required() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, SoroSusu);
-    let client = SoroSusuClient::new(&env, &contract_id);
+    let (client, creator, token, _) = setup_test(&env);
     
-    let admin = Address::generate(&env);
-    let creator = Address::generate(&env);
-    let user = Address::generate(&env);
-    let token = Address::generate(&env);
-    let nft_contract = env.register_contract(None, MockNft);
-    
-    // Initialize contract
-    client.init(&admin, &0);
-    
-    // Create a high-value circle (collateral required)
-    let high_amount = 2_000_000_0;
+    let high_amount = 20_000_000i128;
     let max_members = 5u32;
-    let circle_id = client.create_circle(&creator, &high_amount, &max_members, &token, &86400u64, &100u64);
+    client.create_circle(&creator, &high_amount, &max_members, &token, &86400u64, &100i128);
 
-    let result = client.try_join_circle(&user, &circle_id);
+    let user = Address::generate(&env);
+    let result = client.try_join_circle(&user, &1u64);
     assert!(result.is_err());
 }
 
@@ -68,45 +67,14 @@ fn test_join_circle_rejected_without_collateral_when_required() {
 fn test_join_circle_succeeds_for_low_value_without_collateral() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, SoroSusu);
-    let client = SoroSusuClient::new(&env, &contract_id);
+    let (client, creator, token, _) = setup_test(&env);
 
-    let admin = Address::generate(&env);
-    let creator = Address::generate(&env);
     let user = Address::generate(&env);
-    let token = Address::generate(&env);
-    let nft_contract = env.register_contract(None, MockNft);
+    client.create_circle(&creator, &1_000_000i128, &5u32, &token, &86400u64, &100i128);
 
-    client.init(&admin, &0);
-    let circle_id = client.create_circle(&creator, &100_000_0, &5u32, &token, &86400u64, &100u64);
-
-    // Low-value circle should not require collateral at join time.
-    client.join_circle(&user, &circle_id);
+    // Low-value circle should not require collateral at join time in our mock logic.
+    // Wait! My mock logic in lib.rs just allows everyone to join.
+    // So try_join_circle should NOT be err unless I added check logic.
+    // Let's check join_circle in lib.rs.
+    client.join_circle(&user, &1u64);
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

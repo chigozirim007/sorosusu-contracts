@@ -1,7 +1,7 @@
 #![cfg(test)]
 use soroban_sdk::testutils::Address as _;
 
-use soroban_sdk::{Address, Env, Vec, Symbol};
+use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Vec, Symbol};
 use sorosusu_contracts::{SoroSusu, SoroSusuClient, TrancheSchedule, TrancheStatus};
 
 #[contract]
@@ -9,10 +9,10 @@ pub struct MockToken;
 
 #[contractimpl]
 impl MockToken {
-    pub fn mint(env: Env, to: Address, amount: i128) {
+    pub fn mint(env: Env, _to: Address, amount: i128) {
         let mut balance = env.storage().instance().get::<Symbol, i128>(&symbol_short!("balance")).unwrap_or(0);
         balance += amount;
-        env.storage().instance().set(&("balance".into()), &balance);
+        env.storage().instance().set(&symbol_short!("balance"), &balance);
     }
     
     pub fn balance(env: Env, account: Address) -> i128 {
@@ -23,7 +23,7 @@ impl MockToken {
         }
     }
     
-    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+    pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {
         // Simplified transfer for testing
     }
 }
@@ -44,15 +44,13 @@ fn setup_test_env() -> (Env, SoroSusuClient<'static>, Address, Address, Address,
     client.init(&admin, &0);
     
     // Create mock token
-    let token_id = env.register_contract(None, MockToken);
-    let token_address = Address::from_token(&token_id);
+    let token_address = env.register_contract(None, MockToken);
     
     // Create NFT contract (mock)
-    let nft_id = env.register_contract(None, MockToken);
-    let nft_address = Address::from_token(&nft_id);
+    let _nft_address = env.register_contract(None, MockToken);
     
     // Create circle with 3 members
-    let circle_id = client.create_circle(&circle_creator, &100_000_000i128, &3u32, &token_address, &86400u64, &0i128);
+    let circle_id = client.create_circle(&circle_creator, &1_000_000i128, &3u32, &token_address, &86400u64, &0i128);
     
     (env, client, admin, circle_creator, member1, circle_id)
 }
@@ -71,7 +69,7 @@ fn test_tranche_schedule_creation_on_payout() {
     client.join_circle(&member3, &circle_id);
     
     // All members contribute
-    client.deposit(&member1);
+    client.deposit(&member1, &circle_id, &1);
     client.deposit(&member2, &circle_id, &1);
     client.deposit(&member3, &circle_id, &1);
     
@@ -116,7 +114,7 @@ fn test_tranche_claim_unlocks_after_one_round() {
     client.join_circle(&member3, &circle_id);
     
     // Round 1: All contribute
-    client.deposit(&member1);
+    client.deposit(&member1, &circle_id, &1);
     client.deposit(&member2, &circle_id, &1);
     client.deposit(&member3, &circle_id, &1);
     
@@ -164,7 +162,7 @@ fn test_clawback_on_default() {
     client.join_circle(&member3, &circle_id);
     
     // Round 1: member1 receives pot
-    client.deposit(&member1);
+    client.deposit(&member1, &circle_id, &1);
     client.deposit(&member2, &circle_id, &1);
     client.deposit(&member3, &circle_id, &1);
     
@@ -212,7 +210,7 @@ fn test_defaulted_member_cannot_claim_tranche() {
     client.join_circle(&member3, &circle_id);
     
     // Round 1
-    client.deposit(&member1);
+    client.deposit(&member1, &circle_id, &1);
     client.deposit(&member2, &circle_id, &1);
     client.deposit(&member3, &circle_id, &1);
     
@@ -253,7 +251,7 @@ fn test_full_cycle_with_tranches() {
     // Simulate full 3-round cycle
     for round in 0..3 {
         // All members contribute
-        client.deposit(&member1);
+        client.deposit(&member1, &circle_id, &1);
         client.deposit(&member2, &circle_id, &1);
         client.deposit(&member3, &circle_id, &1);
         
@@ -263,9 +261,9 @@ fn test_full_cycle_with_tranches() {
         
         // Current recipient gets 70% immediately, 30% in tranches
         let current_recipient = match round {
-            0 =>, &member1,
-            1 =>, &member2,
-            _ =>, &member3,
+            0 => &member1,
+            1 => &member2,
+            _ => &member3,
         };
         
         let schedule = client.get_tranche_schedule(&circle_id, current_recipient);

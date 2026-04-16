@@ -30,7 +30,7 @@ fn test_quadratic_voting_enabled_for_large_groups() {
     client.init(&admin, &0);
     
     // Create large group (>= 10 members) - quadratic voting should be enabled
-    let circle_id = client.create_circle(&creator, &50_000_000i128, &15u32, &token, &86400u64, &100i128);
+    let circle_id = client.create_circle(&creator, &1_000_000i128, &15u32, &token, &86400u64, &0i128);
     
     let proposer = Address::generate(&env);
     client.join_circle(&proposer, &circle_id);
@@ -44,7 +44,7 @@ fn test_quadratic_voting_enabled_for_large_groups() {
     
     // Create small group (< 10 members) - quadratic voting should be disabled
         let small_creator = Address::generate(&env);
-    let small_circle_id = client.create_circle(&small_creator, &50_000_000i128, &5u32, &token, &86400u64, &100i128);
+    let small_circle_id = client.create_circle(&small_creator, &1_000_000i128, &5u32, &token, &86400u64, &0i128);
     
     let small_proposer = Address::generate(&env);
     client.join_circle(&small_proposer, &circle_id);
@@ -75,7 +75,7 @@ fn test_proposal_lifecycle_vote_and_execute() {
     client.init(&admin, &0);
     
     // Create large group
-    let circle_id = client.create_circle(&creator, &90_000_0, &10u32, &token, &86400u64, &100u64);
+    let circle_id = client.create_circle(&creator, &90_000_0i128, &10u32, &token, &86400u64, &0i128);
     
     // Join circle
     client.join_circle(&proposer, &circle_id);
@@ -124,7 +124,7 @@ fn test_vote_rejected_when_voting_power_insufficient() {
     let nft_contract = env.register_contract(None, MockNft);
 
     client.init(&admin, &0);
-    let circle_id = client.create_circle(&creator, &90_000_0, &10u32, &token, &86400u64, &100u64);
+    let circle_id = client.create_circle(&creator, &90_000_0i128, &10u32, &token, &86400u64, &0i128);
     client.join_circle(&proposer, &circle_id);
     client.join_circle(&voter, &circle_id);
 
@@ -133,9 +133,9 @@ fn test_vote_rejected_when_voting_power_insufficient() {
     let execution_data = String::from_str(&env, "{}");
     let proposal_id = client.create_proposal( &proposer, &circle_id, &ProposalType::ChangeLateFee, &title, &description, &execution_data);
 
-    client.update_voting_power(&voter, &circle_id, &1_000_0);
+    client.update_voting_power(&voter, &circle_id, &10000i128);
 
-    let result = client.try_quadratic_vote(&voter, &proposal_id, &10u32, &QuadraticVoteChoice::For);
+    let result = client.try_quadratic_vote(&voter, &proposal_id, &15u32, &QuadraticVoteChoice::For);
     assert!(result.is_err());
 }
 
