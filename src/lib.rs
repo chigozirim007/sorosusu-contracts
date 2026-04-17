@@ -391,7 +391,16 @@ impl SoroSusuTrait for SoroSusu {
                 return;
             }
         }
-        token::Client::new(&env, &c.token).transfer(&env.current_contract_address(), &u, &(c.contribution_amount * (c.member_count as i128)));
+        if env.storage().instance().get::<DataKey, bool>(&DataKey::K2(symbol_short!("LDef"), cid, u.clone())).unwrap_or(false) {
+            panic!("locked due to a default");
+        }
+
+        let mut recipient = u.clone();
+        if let Some(auth_recipient) = env.storage().instance().get::<DataKey, Address>(&DataKey::K2(symbol_short!("LAuth"), cid, u.clone())) {
+            recipient = auth_recipient;
+        }
+
+        token::Client::new(&env, &c.token).transfer(&env.current_contract_address(), &recipient, &(c.contribution_amount * (c.member_count as i128)));
         c.is_active = false;
         env.storage().instance().set(&DataKey::K1(symbol_short!("C"), cid), &c);
     }
