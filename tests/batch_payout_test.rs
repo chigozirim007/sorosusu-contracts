@@ -10,6 +10,7 @@ pub struct MockTokenSusu;
 impl MockTokenSusu {
     pub fn init_mock(_env: Env, _admin: Address) {}
     pub fn mint(_env: Env, _to: Address, _amount: i128) {}
+    pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {}
     pub fn balance(_env: Env, _addr: Address) -> i128 { 1_000_000_000 }
 }
 

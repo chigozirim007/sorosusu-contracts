@@ -392,7 +392,48 @@ impl SoroSusuTrait for SoroSusu {
     }
     fn finalize_round(env: Env, u: Address, cid: u64) { u.require_auth(); let mut c: CircleInfo = env.storage().instance().get(&DataKey::K1(symbol_short!("C"), cid)).unwrap(); c.is_round_finalized = true; c.current_pot_recipient = Some(u); env.storage().instance().set(&DataKey::K1(symbol_short!("C"), cid), &c); }
     fn configure_batch_payout(env: Env, creator: Address, cid: u64, winners: u32) { creator.require_auth(); let mut c: CircleInfo = env.storage().instance().get(&DataKey::K1(symbol_short!("C"), cid)).unwrap(); c.winners_per_round = winners; c.batch_payout_enabled = true; env.storage().instance().set(&DataKey::K1(symbol_short!("C"), cid), &c); }
-    fn distribute_batch_payout(_env: Env, caller: Address, _cid: u64) { caller.require_auth(); }
+    fn distribute_batch_payout(env: Env, caller: Address, cid: u64) {
+        caller.require_auth();
+        let mut c: CircleInfo = env.storage().instance().get(&DataKey::K1(symbol_short!("C"), cid)).unwrap();
+        if c.winners_per_round == 0 { return; }
+        
+        let total_pot = c.contribution_amount * (c.member_count as i128);
+        let amount_per_winner = total_pot / (c.winners_per_round as i128);
+        
+        let mut winners = Vec::new(&env);
+        for i in 0..c.winners_per_round {
+            if let Some(w) = c.member_addresses.get(i) {
+                token::Client::new(&env, &c.token).transfer(&env.current_contract_address(), &w, &amount_per_winner);
+                winners.push_back(w);
+            }
+        }
+        
+        let record = BatchPayoutRecord {
+            batch_payout_id: 1, // Simple mock ID
+            circle_id: cid,
+            round_number: c.round_number,
+            total_winners: c.winners_per_round,
+            total_pot,
+            organizer_fee: 0,
+            net_payout_per_winner: amount_per_winner,
+            dust_amount: total_pot % (c.winners_per_round as i128),
+            winners: winners.clone(),
+            payout_timestamp: env.ledger().timestamp(),
+        };
+        env.storage().instance().set(&DataKey::K2U(symbol_short!("BRec"), cid, c.round_number), &record);
+        
+        for w in winners.iter() {
+            let claim = IndividualPayoutClaim {
+                recipient: w.clone(),
+                circle_id: cid,
+                round_number: c.round_number,
+                amount_claimed: amount_per_winner,
+                batch_payout_id: 1,
+                claim_timestamp: env.ledger().timestamp(),
+            };
+            env.storage().instance().set(&DataKey::K3U(symbol_short!("IClm"), w, cid, c.round_number), &claim);
+        }
+    }
     fn get_batch_payout_record(env: Env, cid: u64, rn: u32) -> Option<BatchPayoutRecord> { env.storage().instance().get(&DataKey::K2U(symbol_short!("BRec"), cid, rn)) }
     fn get_individual_payout_claim(env: Env, u: Address, cid: u64, rn: u32) -> Option<IndividualPayoutClaim> { env.storage().instance().get(&DataKey::K3U(symbol_short!("IClm"), u, cid, rn)) }
     fn get_circle(env: Env, cid: u64) -> CircleInfo { env.storage().instance().get(&DataKey::K1(symbol_short!("C"), cid)).unwrap() }
