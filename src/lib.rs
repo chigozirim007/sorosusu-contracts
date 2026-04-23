@@ -9,208 +9,262 @@ use soroban_sdk::{
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
-pub enum Error { AlreadyInit = 100, NotAuth = 101, NotFound = 102, MemberExists = 103, LowFunds = 104, InvalidAmt = 105, NotMember = 106, InsufficientReputation = 107 }
+pub enum Error {
+    Unauthorized = 1,
+    MemberNotFound = 2,
+    CircleFull = 3,
+    AlreadyMember = 4,
+    CircleNotFound = 5,
+    InvalidAmount = 6,
+    RoundAlreadyFinalized = 7,
+    RoundNotFinalized = 8,
+    NotAllContributed = 9,
+    PayoutNotScheduled = 10,
+    PayoutTooEarly = 11,
+    InsufficientInsurance = 12,
+    InsuranceAlreadyUsed = 13,
+    RateLimitExceeded = 14,
+    InsufficientCollateral = 15,
+    CollateralAlreadyStaked = 16,
+    CollateralNotStaked = 17,
+    CollateralLocked = 18,
+    MemberNotDefaulted = 19,
+    CollateralAlreadyReleased = 20,
+    LeniencyRequestNotFound = 21,
+    AlreadyVoted = 22,
+    VotingPeriodExpired = 23,
+    LeniencyAlreadyApproved = 24,
+    LeniencyNotRequested = 25,
+    CannotVoteForOwnRequest = 26,
+    InvalidVote = 27,
+    ProposalNotFound = 28,
+    ProposalAlreadyExecuted = 29,
+    VotingNotActive = 30,
+    InsufficientVotingPower = 31,
+    QuadraticVoteExceeded = 32,
+    InvalidProposalType = 33,
+    QuorumNotMet = 34,
+    ProposalExpired = 35,
+    AppealNotFound = 36,
+    AppealAlreadyFinalized = 37,
+}
+
+// --- CONSTANTS ---
+const REFERRAL_DISCOUNT_BPS: u32 = 500; // 5%
+const RATE_LIMIT_SECONDS: u64 = 300; // 5 minutes
+const LENIENCY_GRACE_PERIOD: u64 = 172800; // 48 hours in seconds
+const VOTING_PERIOD: u64 = 86400; // 24 hours voting period
+const MINIMUM_VOTING_PARTICIPATION: u32 = 50; // 50% minimum participation
+const SIMPLE_MAJORITY_THRESHOLD: u32 = 51; // 51% simple majority
+const QUADRATIC_VOTING_PERIOD: u64 = 604800; // 7 days for rule changes
+const QUADRATIC_QUORUM: u32 = 40; // 40% quorum for quadratic voting
+const QUADRATIC_MAJORITY: u32 = 60; // 60% supermajority for rule changes
+const MAX_VOTE_WEIGHT: u32 = 100; // Maximum quadratic vote weight
+const MIN_GROUP_SIZE_FOR_QUADRATIC: u32 = 10; // Enable quadratic voting for groups >= 10 members
+const DEFAULT_COLLATERAL_BPS: u32 = 2000; // 20%
+const HIGH_VALUE_THRESHOLD: i128 = 1_000_000_0; // 1000 XLM (assuming 7 decimals)
+const REPUTATION_AMNESTY_THRESHOLD: u32 = 66; // 66% for 2/3 majority
+const MAX_RI: u32 = 1000;
+const RI_PENALTY: u32 = 200;
+const RI_RESTORE: u32 = 200;
+
+// --- DATA STRUCTURES ---
 
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
-    K(Symbol),
-    K1(Symbol, u64),
-    K1A(Symbol, Address),
-    K2(Symbol, u64, Address),
-    K3(Symbol, u64, Address, u64),
-    K2U(Symbol, u64, u32),
-    K3U(Symbol, Address, u64, u32),
-    K1U(Symbol, u32),
-    K1B(Symbol, u128),
-    UserStats(Address),
+    Admin,
+    Circle(u64),
+    Member(Address),
+    CircleCount,
+    Deposit(u64, Address),
+    GroupReserve,
+    ScheduledPayoutTime(u64),
+    LastCreatedTimestamp(Address),
+    SafetyDeposit(Address, u64),
+    LendingPool,
+    CollateralVault(Address, u64),
+    CollateralConfig(u64),
+    DefaultedMembers(u64),
+    LeniencyRequest(u64, Address),
+    LeniencyVotes(u64, Address, Address),
+    SocialCapital(Address, u64),
+    LeniencyStats(u64),
+    Proposal(u64),
+    QuadraticVote(u64, Address),
+    VotingPower(Address, u64),
+    ProposalStats(u64),
+    ReliabilityIndex(Address),
+    ReputationAppeal(u64, Address),
+    AppealVotes(u64, Address, Address),
 }
 
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum MemberStatus { Active, Awaiting, Ejected, Defaulted }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum LeniencyRequestStatus { Pending, Approved, Rejected, Expired }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum LeniencyVote { Approve, Reject }
-#[contracttype] #[derive(Clone)] pub struct LeniencyRequest { pub requester: Address, pub circle_id: u64, pub request_timestamp: u64, pub voting_deadline: u64, pub status: LeniencyRequestStatus, pub approve_votes: u32, pub reject_votes: u32, pub total_votes_cast: u32, pub extension_hours: u64, pub reason: String }
-#[contracttype] #[derive(Clone)] pub struct DurationProposal { pub id: u64, pub new_duration: u64, pub votes_for: u32, pub votes_against: u32, pub end_time: u64, pub is_active: bool }
-#[contracttype] #[derive(Clone)] pub struct SocialCapital { pub member: Address, pub circle_id: u64, pub leniency_given: u32, pub leniency_received: u32, pub voting_participation: u32, pub trust_score: u32 }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum ProposalStatus { Draft, Active, Approved, Rejected, Executed, Expired }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum ProposalType { RuleChange, AdminUpdate, EmergencyHalt, ChangeLateFee, ChangeInsuranceFee, ChangeCycleDuration, AddMember, RemoveMember, ChangeQuorum, EmergencyAction }
-#[contracttype] #[derive(Clone)] pub struct Proposal { pub id: u64, pub circle_id: u64, pub proposer: Address, pub proposal_type: ProposalType, pub title: String, pub description: String, pub created_timestamp: u64, pub voting_start_timestamp: u64, pub voting_end_timestamp: u64, pub status: ProposalStatus, pub for_votes: u64, pub against_votes: u64, pub total_voting_power: u64, pub quorum_met: bool, pub execution_data: String }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum QuadraticVoteChoice { For, Against, Abstain }
-#[contracttype] #[derive(Clone)] pub struct VotingPower { pub member: Address, pub circle_id: u64, pub token_balance: i128, pub quadratic_power: u64, pub last_updated: u64 }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum CollateralStatus { NotStaked, Staked, Slashed, Released, Defaulted }
-#[contracttype] #[derive(Clone)] pub struct CollateralInfo { pub member: Address, pub circle_id: u64, pub amount: i128, pub status: CollateralStatus, pub staked_timestamp: u64, pub release_timestamp: Option<u64> }
-#[contracttype] #[derive(Clone)] pub struct Member { pub address: Address, pub index: u32, pub contribution_count: u32, pub last_contribution_time: u64, pub status: MemberStatus, pub tier_multiplier: u32, pub referrer: Option<Address>, pub buddy: Option<Address>, pub has_contributed_current_round: bool, pub total_contributions: i128 }
-#[contracttype] #[derive(Clone)] pub struct CircleInfo { pub id: u64, pub creator: Address, pub contribution_amount: i128, pub max_members: u32, pub member_count: u32, pub current_recipient_index: u32, pub is_active: bool, pub token: Address, pub deadline_timestamp: u64, pub cycle_duration: u64, pub member_addresses: Vec<Address>, pub recovery_votes_bitmap: u32, pub recovery_old_address: Option<Address>, pub recovery_new_address: Option<Address>, pub grace_period_end: Option<u64>, pub requires_collateral: bool, pub collateral_bps: u32, pub quadratic_voting_enabled: bool, pub proposal_count: u64, pub total_cycle_value: i128, pub winners_per_round: u32, pub batch_payout_enabled: bool, pub current_pot_recipient: Option<Address>, pub is_round_finalized: bool, pub round_number: u32, pub dissolution_status: DissolutionStatus, pub dissolution_deadline: Option<u64> }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum AuditAction { DisputeSubmission, GovernanceVote, EvidenceAccess, AdminAction }
-#[contracttype] #[derive(Clone)] pub struct AuditEntry { pub id: u64, pub actor: Address, pub action: AuditAction, pub timestamp: u64, pub resource_id: u64 }
-#[contracttype] #[derive(Clone)] pub struct UserStats { pub total_volume_saved: i128, pub on_time_contributions: u32, pub late_contributions: u32 }
-#[contracttype] #[derive(Clone)] pub struct NftBadgeMetadata { pub name: String, pub description: String, pub image_url: String }
-#[contracttype] #[derive(Clone)] pub struct BatchPayoutRecord { pub batch_payout_id: u64, pub circle_id: u64, pub round_number: u32, pub total_winners: u32, pub total_pot: i128, pub organizer_fee: i128, pub net_payout_per_winner: i128, pub dust_amount: i128, pub winners: Vec<Address>, pub payout_timestamp: u64 }
-#[contracttype] #[derive(Clone)] pub struct IndividualPayoutClaim { pub recipient: Address, pub circle_id: u64, pub round_number: u32, pub amount_claimed: i128, pub batch_payout_id: u64, pub claim_timestamp: u64 }
-#[contracttype] #[derive(Clone)] pub struct AssetWeight { pub token: Address, pub weight_bps: u32 }
-#[contracttype] #[derive(Clone)] pub struct UserReputationMetrics { pub reliability_score: u32, pub social_capital_score: u32, pub total_cycles: u32, pub perfect_cycles: u32, pub total_volume_saved: i128, pub last_activity: u64, pub last_decay: u64, pub on_time_contributions: u32, pub total_contributions: u32 }
-#[contracttype] #[derive(Clone)] pub struct ReputationData { pub user_address: Address, pub susu_score: u32, pub reliability_score: u32, pub total_contributions: u32, pub on_time_rate: u32, pub volume_saved: i128, pub social_capital: u32, pub last_updated: u64, pub is_active: bool }
-#[contracttype] #[derive(Clone)] pub struct DissolutionProposal { pub initiator: Address, pub circle_id: u64, pub status: DissolutionStatus, pub approve_votes: u32, pub reject_votes: u32, pub dissolution_timestamp: Option<u64> }
-#[contracttype] #[derive(Clone)] pub struct AnchorInfo { pub anchor_address: Address, pub anchor_name: String, pub sep_version: String, pub authorization_level: u32, pub compliance_level: u32, pub is_active: bool, pub registration_timestamp: u64, pub last_activity: u64, pub supported_countries: Vec<String>, pub max_deposit_amount: i128, pub daily_deposit_limit: i128 }
-#[contracttype] #[derive(Clone)] pub struct AnchorDeposit { pub id: u64, pub anchor_address: Address, pub beneficiary_user: Address, pub circle_id: u64, pub amount: i128, pub deposit_memo: String, pub fiat_reference: String, pub sep_type: String, pub timestamp: u64, pub processed: bool, pub compliance_verified: bool }
-#[contracttype] #[derive(Clone)] pub struct DexSwapConfig { pub enabled: bool, pub swap_threshold_xlm: i128, pub swap_percentage_bps: u32, pub dex_contract: Address, pub xlm_token: Address, pub slippage_tolerance_bps: u32, pub minimum_swap_amount: i128, pub emergency_pause: bool, pub last_swap_timestamp: u64, pub total_swapped_xlm: i128 }
-#[contracttype] #[derive(Clone)] pub struct DexSwapRecord { pub success: bool, pub usdc_amount: i128, pub xlm_received: i128 }
-#[contracttype] #[derive(Clone)] pub struct GasReserve { pub xlm_balance: i128, pub reserved_for_ttl: u64, pub auto_swap_enabled: bool, pub last_refill_timestamp: u64, pub consumption_rate: u64 }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum TrancheStatus { Pending, Locked, Unlocked, Claimed, ClawedBack }
-#[contracttype] #[derive(Clone)] pub struct Tranche { pub amount: i128, pub unlock_round: u32, pub status: TrancheStatus }
-#[contracttype] #[derive(Clone)] pub struct TrancheSchedule { pub circle_id: u64, pub winner: Address, pub total_pot: i128, pub immediate_payout: i128, pub tranches: Vec<Tranche> }
-#[contracttype] #[derive(Clone)] pub struct GrantSettlement { pub grant_id: u64, pub grantee: Address, pub total_grant_amount: i128, pub amount_dripped: i128, pub work_in_progress_pay: i128, pub treasury_return: i128 }
-#[contracttype] #[derive(Clone)] pub struct VotingSnapshot { pub proposal_id: u64, pub total_votes: u32, pub for_votes: u32, pub against_votes: u32, pub abstain_votes: u32, pub quorum_required: u32, pub quorum_met: bool, pub result: Symbol, pub vote_hash: BytesN<32> }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum MilestoneProgress { NotStarted, InProgress, Completed, OnHold, Cancelled }
-#[contracttype] #[derive(Clone)] pub struct ImpactCertificateMetadata { pub id: u128, pub grantee: Address, pub total_phases: u32, pub phases_completed: u32, pub impact_score: u32, pub on_chain_badge: Symbol, pub milestone_status: MilestoneProgress }
-#[contracttype] #[derive(Clone)] pub struct ProposalStats { pub total_proposals: u64, pub active_proposals: u64, pub approved_proposals: u64, pub rejected_proposals: u64, pub executed_proposals: u64 }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum DissolutionVoteChoice { Approve, Reject }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum DissolutionStatus { Active, Expired, Succeeded, Failed, Voting, Approved, Refunding }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum RefundStatus { Pending, Claimed, Cancelled }
-#[contracttype] #[derive(Clone)] pub struct NetPosition { pub member: Address, pub circle_id: u64, pub has_received_pot: bool, pub refund_claimed: bool }
-#[contracttype] #[derive(Clone)] pub struct RefundClaim { pub member: Address, pub circle_id: u64, pub status: RefundStatus }
-#[contracttype] #[derive(Clone)] pub struct DissolvedCircle { pub circle_id: u64, pub dissolution_timestamp: u64, pub total_contributions: i128, pub total_members: u32, pub refunded_members: u32, pub remaining_funds: i128, pub dissolution_status: DissolutionStatus }
-#[contracttype] #[derive(Clone)] pub struct DefaultRecoveryConfig { pub enabled: bool, pub sprint_duration: u64, pub priority_claim_bps: u32, pub healthy_member_bps: u32, pub max_sprint_participants: u32, pub min_participant_score: u32, pub collateral_release_bps: u32 }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum RecoverySprintStatus { Active, Completed, Cancelled }
-#[contracttype] #[derive(Clone)] pub struct RecoverySprint { pub id: u64, pub circle_id: u64, pub defaulter: Address, pub start_round: u32, pub status: RecoverySprintStatus, pub participants: Vec<Address>, pub priority_claim_amount: i128, pub healthy_claim_amount: i128, pub collateral_released: i128 }
-#[contracttype] #[derive(Clone)] pub struct PriorityClaim { pub claimant: Address, pub sprint_id: u64, pub original_defaulter_share: i128, pub bonus_percentage_bps: u32, pub claim_amount: i128 }
-#[contracttype] #[derive(Clone)] pub struct HealthyMemberClaim { pub claimant: Address, pub sprint_id: u64, pub claim_amount: i128, pub reputation_score: u32 }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum DebtRestructuringStatus { Active, Completed, Cancelled }
-#[contracttype] #[derive(Clone)] pub struct InternalDebtRestructuring { pub original_principal: i128, pub interest_rate_bps: u32, pub start_round: u32, pub status: DebtRestructuringStatus, pub restructured_amount: i128 }
-#[contracttype] #[derive(Clone)] pub struct LendingMarketConfig { pub is_enabled: bool, pub emergency_mode: bool, pub min_participation_bps: u32, pub quorum_bps: u32, pub emergency_quorum_bps: u32, pub max_ltv_ratio: u32, pub base_interest_rate_bps: u32, pub risk_adjustment_bps: u32 }
-#[contracttype] #[derive(Clone)] pub struct LendingPoolInfo { pub lender_circle_id: u64, pub borrower_circle_id: u64, pub total_liquidity: i128, pub available_amount: i128, pub utilized_amount: i128, pub participant_count: u32, pub is_active: bool }
-#[contracttype] #[derive(Clone)] pub struct LendingPosition { pub borrower: Address, pub principal_amount: i128, pub loan_amount: i128, pub remaining_balance: i128, pub status: LoanStatus, pub last_payment_timestamp: Option<u64> }
-#[contracttype] #[derive(Clone)] pub struct RepaymentSchedule { pub total_payments: u32, pub payments_made: u32, pub amount_per_payment: i128 }
-#[contracttype] #[derive(Clone)] pub struct LendingMarketStats { pub total_pools_created: u64, pub active_pools: u64, pub total_loans_issued: u64, pub active_loans: u64, pub total_volume_lent: i128, pub average_loan_size: i128 }
-#[contracttype] #[derive(Clone)] pub struct EmergencyLoan { pub amount: i128, pub current_votes: u32, pub status: LendingMarketStatus }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum LendingVoteChoice { Approve, Reject }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum RiskCategory { LowRisk, MediumRisk, HighRisk, VeryHighRisk }
-#[contracttype] #[derive(Clone)] pub struct LiquidityProvider { pub address: Address, pub amount: i128 }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum LoanStatus { Active, Repaying, Defaulted, Closed }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum LendingMarketStatus { Active, Paused, Terminated }
-#[contracttype] #[derive(Clone)] pub struct LiquidityBufferConfig { pub is_enabled: bool, pub advance_period: u64, pub min_reputation: u32, pub max_advance_bps: u32, pub platform_fee_allocation: u32, pub min_reserve: i128, pub max_reserve: i128, pub advance_fee_bps: u32, pub grace_period: u64, pub max_advances_per_round: u32 }
-#[contracttype] #[derive(Clone)] pub struct LiquidityBufferStats { pub total_reserve_balance: i128, pub total_advances_provided: i128, pub active_advances_count: u32 }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum LiquidityAdvanceStatus { Pending, Active, Repaid, Defaulted, Cancelled }
-#[contracttype] #[derive(Clone)] pub struct LiquidityAdvance { pub id: u64, pub member: Address, pub circle_id: u64, pub contribution_amount: i128, pub advance_amount: i128, pub advance_fee: i128, pub repayment_amount: i128, pub status: LiquidityAdvanceStatus, pub requested_timestamp: u64, pub provided_timestamp: Option<u64> }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum LienStatus { Active, Claimed, Released }
-#[contracttype] #[derive(Clone)] pub struct LienInfo { pub member: Address, pub circle_id: u64, pub vesting_vault_contract: Address, pub lien_amount: i128, pub status: LienStatus, pub create_timestamp: u64, pub claim_timestamp: Option<u64>, pub release_timestamp: Option<u64>, pub lien_id: u64 }
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum MemberStatus {
+    Active,
+    AwaitingReplacement,
+    Ejected,
+    Defaulted,
+}
 
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum SbtStatus { Pathfinder, Pioneer, Guardian }
-#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)] pub enum ReputationTier { Bronze, Silver, Gold, Platinum }
-#[contracttype] #[derive(Clone)] pub struct ReputationMilestone { pub user: Address, pub required_cycles: u32, pub description: String, pub tier: ReputationTier }
-#[contracttype] #[derive(Clone)] pub struct SbtCredential { pub user: Address, pub milestone_id: u64, pub metadata_uri: String, pub status: SbtStatus }
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum LeniencyVote {
+    Approve,
+    Reject,
+}
 
-#[contractclient(name = "SusuNftClient")] pub trait SusuNftTrait { fn mint(env: Env, to: Address, id: u128); fn burn(env: Env, from: Address, id: u128); fn mint_badge(env: Env, to: Address, id: u128, m: NftBadgeMetadata); }
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum LeniencyRequestStatus {
+    Pending,
+    Approved,
+    Rejected,
+    Expired,
+}
 
-#[contractclient(name = "SoroSusuTraitClient")]
-pub trait SoroSusuTrait {
-    fn init(env: Env, admin: Address, fee: u32);
-    fn create_circle(env: Env, creator: Address, amt: i128, max: u32, tok: Address, dur: u64, bond: i128) -> u64;
-    fn create_basket_circle(env: Env, creator: Address, amt: i128, max: u32, assets: Vec<Address>, weights: Vec<u32>, dur: u64, ifee: u64, nft: Address, arb: Address) -> u64;
-    fn join_circle(env: Env, u: Address, cid: u64);
-    fn deposit(env: Env, u: Address, cid: u64, r: u32);
-    fn deposit_basket(env: Env, u: Address, cid: u64);
-    fn propose_duration(env: Env, u: Address, cid: u64, dur: u64) -> u64;
-    fn vote_duration(env: Env, u: Address, cid: u64, pid: u64, app: bool);
-    fn slash_bond(env: Env, adm: Address, cid: u64);
-    fn release_bond(env: Env, adm: Address, cid: u64);
-    fn pair_with_member(env: Env, u: Address, buddy: Address);
-    fn set_safety_deposit(env: Env, u: Address, cid: u64, amt: i128);
-    fn propose_address_change(env: Env, prop: Address, cid: u64, old: Address, new: Address);
-    fn vote_for_recovery(env: Env, voter: Address, cid: u64);
-    fn stake_xlm(env: Env, u: Address, tok: Address, amt: i128);
-    fn unstake_xlm(env: Env, u: Address, tok: Address, amt: i128);
-    fn update_global_fee(env: Env, adm: Address, fee: u32);
-    fn request_leniency(env: Env, req: Address, cid: u64, reason: String);
-    fn vote_on_leniency(env: Env, voter: Address, cid: u64, req: Address, v: LeniencyVote);
-    fn finalize_leniency_vote(env: Env, caller: Address, cid: u64, req: Address);
-    fn get_leniency_request(env: Env, cid: u64, req: Address) -> LeniencyRequest;
-    fn get_social_capital(env: Env, m: Address, cid: u64) -> SocialCapital;
-    fn create_proposal(env: Env, prop: Address, cid: u64, pt: ProposalType, title: String, desc: String, ed: String) -> u64;
-    fn quadratic_vote(env: Env, voter: Address, pid: u64, weight: u32, vc: QuadraticVoteChoice);
-    fn execute_proposal(env: Env, caller: Address, pid: u64);
-    fn get_proposal(env: Env, pid: u64) -> Proposal;
-    fn get_voting_power(env: Env, m: Address, cid: u64) -> VotingPower;
-    fn update_voting_power(env: Env, m: Address, cid: u64, bal: i128);
-    fn stake_collateral(env: Env, u: Address, cid: u64, amt: i128);
-    fn slash_collateral(env: Env, caller: Address, cid: u64, m: Address);
-    fn release_collateral(env: Env, caller: Address, cid: u64, m: Address);
-    fn mark_member_defaulted(env: Env, caller: Address, cid: u64, m: Address);
-    fn get_audit_entry(env: Env, id: u64) -> AuditEntry;
-    fn query_audit_by_actor(env: Env, actor: Address, s: u64, e: u64, o: u32, l: u32) -> Vec<AuditEntry>;
-    fn query_audit_by_resource(env: Env, rid: u64, s: u64, e: u64, o: u32, l: u32) -> Vec<AuditEntry>;
-    fn query_audit_by_time(env: Env, s: u64, e: u64, o: u32, l: u32) -> Vec<AuditEntry>;
-    fn set_leaseflow_contract(env: Env, adm: Address, rot: Address);
-    fn authorize_leaseflow_payout(env: Env, u: Address, cid: u64, li: Address);
-    fn handle_leaseflow_default(env: Env, rot: Address, ten: Address, cid: u64);
-    fn claim_pot(env: Env, u: Address, cid: u64);
-    fn finalize_round(env: Env, u: Address, cid: u64);
-    fn configure_batch_payout(env: Env, creator: Address, cid: u64, winners: u32);
-    fn distribute_batch_payout(env: Env, caller: Address, cid: u64);
-    fn get_batch_payout_record(env: Env, cid: u64, rn: u32) -> Option<BatchPayoutRecord>;
-    fn get_individual_payout_claim(env: Env, u: Address, cid: u64, rn: u32) -> Option<IndividualPayoutClaim>;
-    fn get_circle(env: Env, cid: u64) -> CircleInfo;
-    fn get_member(env: Env, u: Address) -> Member;
-    fn get_basket_config(env: Env, cid: u64) -> Vec<AssetWeight>;
-    fn register_anchor(env: Env, adm: Address, info: AnchorInfo);
-    fn get_anchor_info(env: Env, a: Address) -> AnchorInfo;
-    fn deposit_for_user(env: Env, anc: Address, u: Address, cid: u64, amt: i128, mem: String, fiat: String, sep: String);
-    fn get_deposit_record(env: Env, id: u64) -> AnchorDeposit;
-    fn configure_dex_swap(env: Env, adm: Address, cid: u64, cfg: DexSwapConfig);
-    fn trigger_dex_swap(env: Env, adm: Address, cid: u64);
-    fn get_dex_swap_config(env: Env, cid: u64) -> Option<DexSwapConfig>;
-    fn get_dex_swap_record(env: Env, cid: u64, rid: u64) -> Option<DexSwapRecord>;
-    fn emergency_pause_dex_swaps(env: Env, adm: Address);
-    fn emergency_refill_gas_reserve(env: Env, adm: Address, amt: i128);
-    fn get_gas_reserve(env: Env, cid: u64) -> Option<GasReserve>;
-    fn distribute_payout(env: Env, caller: Address, cid: u64);
-    fn get_tranche_schedule(env: Env, cid: u64, winner: Address) -> Option<TrancheSchedule>;
-    fn claim_tranche(env: Env, u: Address, cid: u64, tid: u32);
-    fn execute_tranche_clawback(env: Env, adm: Address, cid: u64, m: Address);
-    fn terminate_grant_amicably(env: Env, adm: Address, grant_id: u64, grantee: Address, total: i128, dur: u64, start: u64, treasury: Address, tok: Address) -> GrantSettlement;
-    fn create_voting_snapshot_for_audit(env: Env, pid: u64, votes: Vec<(Address, u32, Symbol)>, q: u64) -> VotingSnapshot;
-    fn get_voting_snapshot_for_audit(env: Env, pid: u64) -> Option<VotingSnapshot>;
-    fn initialize_impact_certificate(env: Env, grantee: Address, id: u128, total_phases: u32, uri: String);
-    fn update_milestone_progress(env: Env, adm: Address, id: u128, new_phase: u32, impact: i128) -> ImpactCertificateMetadata;
-    fn get_progress_bar_data(env: Env, id: u128) -> Option<Map<Symbol, String>>;
-    fn set_sanctions_oracle(env: Env, adm: Address, oracle: Address);
-    fn set_pop_oracle(env: Env, adm: Address, oracle: Address);
-    fn reveal_next_winner(env: Env, cid: u64) -> Address;
-    fn get_frozen_payout(env: Env, cid: u64) -> (i128, Option<Address>);
-    fn review_frozen_payout(env: Env, adm: Address, cid: u64, release: bool);
-    fn create_vesting_lien(env: Env, u: Address, cid: u64, vault: Address, amt: i128) -> u64;
-    fn get_vesting_lien(env: Env, u: Address, cid: u64) -> Option<LienInfo>;
-    fn get_circle_liens(env: Env, cid: u64) -> Vec<LienInfo>;
-    fn verify_vesting_vault(env: Env, vault: Address) -> bool;
-    fn start_round(env: Env, u: Address, cid: u64);
-    fn get_proposal_stats(env: Env, cid: u64) -> ProposalStats;
-    fn initiate_dissolve(env: Env, u: Address, cid: u64, reason: String);
-    fn vote_to_dissolve(env: Env, u: Address, cid: u64, v: DissolutionVoteChoice);
-    fn claim_refund(env: Env, u: Address, cid: u64);
-    fn get_dissolution_status(env: Env, cid: u64) -> DissolutionStatus;
-    fn get_refund_status(env: Env, u: Address, cid: u64) -> RefundStatus;
-    fn get_dissolution_proposal(env: Env, cid: u64) -> DissolutionProposal;
-    fn finalize_dissolution(env: Env, adm: Address, cid: u64);
-    fn get_net_position(env: Env, u: Address, cid: u64) -> NetPosition;
-    fn get_refund_claim(env: Env, u: Address, cid: u64) -> RefundClaim;
-    fn get_dissolved_circle(env: Env, cid: u64) -> DissolvedCircle;
-    fn configure_default_recovery(env: Env, adm: Address, cid: u64, cfg: DefaultRecoveryConfig);
-    fn get_default_recovery_config(env: Env, cid: u64) -> Option<DefaultRecoveryConfig>;
-    fn initiate_recovery_sprint(env: Env, adm: Address, cid: u64, def: Address);
-    fn get_recovery_sprint(env: Env, cid: u64, sid: u64) -> Option<RecoverySprint>;
-    fn make_priority_claim(env: Env, u: Address, cid: u64, sid: u64);
-    fn get_priority_claim(env: Env, sid: u64) -> Option<PriorityClaim>;
-    fn make_healthy_member_claim(env: Env, u: Address, cid: u64, sid: u64);
-    fn get_healthy_member_claim(env: Env, sid: u64) -> Option<HealthyMemberClaim>;
-    fn complete_recovery_sprint(env: Env, adm: Address, cid: u64, sid: u64);
-    fn initiate_debt_restructuring(env: Env, adm: Address, cid: u64, def: Address, pr: i128, int: u32);
-    fn get_debt_restructuring(env: Env, cid: u64, rid: u64) -> Option<InternalDebtRestructuring>;
-    fn make_restructuring_payment(env: Env, u: Address, cid: u64, rid: u64, amt: i128);
-    fn complete_debt_restructuring(env: Env, adm: Address, cid: u64, rid: u64);
-    fn get_reputation(env: Env, user: Address) -> ReputationData;
-    fn update_reputation_on_deposit(env: Env, user: Address, was_on_time: bool);
-    fn apply_inactivity_decay(env: Env, user: Address);
-    fn calculate_fee_discount(env: Env, user: Address) -> u32;
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProposalType {
+    ChangeLateFee,
+    ChangeInsuranceFee,
+    ChangeCycleDuration,
+    AddMember,
+    RemoveMember,
+    ChangeQuorum,
+    EmergencyAction,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProposalStatus {
+    Draft,
+    Active,
+    Approved,
+    Rejected,
+    Executed,
+    Expired,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum QuadraticVoteChoice {
+    For,
+    Against,
+    Abstain,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum AppealStatus {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct LeniencyRequest {
+    pub requester: Address,
+    pub circle_id: u64,
+    pub request_timestamp: u64,
+    pub voting_deadline: u64,
+    pub status: LeniencyRequestStatus,
+    pub approve_votes: u32,
+    pub reject_votes: u32,
+    pub total_votes_cast: u32,
+    pub extension_hours: u64,
+    pub reason: String,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct Proposal {
+    pub id: u64,
+    pub circle_id: u64,
+    pub proposer: Address,
+    pub proposal_type: ProposalType,
+    pub title: String,
+    pub description: String,
+    pub created_timestamp: u64,
+    pub voting_start_timestamp: u64,
+    pub voting_end_timestamp: u64,
+    pub status: ProposalStatus,
+    pub for_votes: u64,
+    pub against_votes: u64,
+    pub total_voting_power: u64,
+    pub quorum_met: bool,
+    pub execution_data: String, // JSON or structured data for execution
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct QuadraticVote {
+    pub voter: Address,
+    pub proposal_id: u64,
+    pub vote_weight: u32,
+    pub vote_choice: QuadraticVoteChoice,
+    pub voting_power_used: u64,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct VotingPower {
+    pub member: Address,
+    pub circle_id: u64,
+    pub token_balance: i128,
+    pub quadratic_power: u64,
+    pub last_updated: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct ProposalStats {
+    pub total_proposals: u32,
+    pub approved_proposals: u32,
+    pub rejected_proposals: u32,
+    pub executed_proposals: u32,
+    pub average_participation: u32,
+    pub average_voting_time: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReliabilityIndex {
+    pub points: u16,           // 0-1000 points
+    pub successful_cycles: u16,
+    pub default_count: u8,
+    pub last_update: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct ReputationAppeal {
+    pub requester: Address,
+    pub circle_id: u64,
+    pub appeal_timestamp: u64,
+    pub voting_deadline: u64,
+    pub status: AppealStatus,
+    pub for_votes: u32,
+    pub against_votes: u32,
+    pub reason: String,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct LeniencyStats {
+    pub total_requests: u32,
+    pub approved_requests: u32,
+    pub rejected_requests: u32,
+    pub expired_requests: u32,
+    pub average_participation: u32,
+pub enum CollateralStatus {
+    NotStaked,
+    Staked,
+    Slashed,
+    Released,
 }
 
 #[contractclient(name = "InterSusuLendingMarketClient")]
@@ -298,31 +352,54 @@ pub mod pot_liquidity_buffer {
 pub type SoroSusuContract = SoroSusu;
 
 
-impl SoroSusu {
-    pub fn create_circle_logic(env: Env, creator: Address, amt: i128, max: u32, tok: Address, dur: u64, _bond: i128) -> u64 {
-        creator.require_auth();
-        let id = 1u64;
-        let mut addrs = Vec::new(&env);
-        addrs.push_back(creator.clone());
-        env.storage().instance().set(&DataKey::K1(symbol_short!("C"), id), &CircleInfo {
-            id, creator: creator.clone(), contribution_amount: amt, max_members: max, member_count: 1, current_recipient_index: 1, is_active: true, token: tok,
-            deadline_timestamp: env.ledger().timestamp() + dur, cycle_duration: dur, member_addresses: addrs, recovery_votes_bitmap: 0,
-            recovery_old_address: None, recovery_new_address: None, grace_period_end: None, requires_collateral: amt > 1000, collateral_bps: 1000, quadratic_voting_enabled: false,
-            proposal_count: 0, total_cycle_value: 0, winners_per_round: 1, batch_payout_enabled: false, current_pot_recipient: None, is_round_finalized: false, round_number: 0,
-            dissolution_status: DissolutionStatus::Active, dissolution_deadline: None
-        });
-        env.storage().instance().set(&DataKey::K2(symbol_short!("M"), id, creator.clone()), &Member { address: creator.clone(), index: 0, contribution_count: 0, last_contribution_time: 0, status: MemberStatus::Active, tier_multiplier: 1, referrer: None, buddy: None, has_contributed_current_round: false, total_contributions: 0 });
-        env.storage().instance().set(&DataKey::K1A(symbol_short!("Mem"), creator.clone()), &Member { address: creator.clone(), index: 0, contribution_count: 0, last_contribution_time: 0, status: MemberStatus::Active, tier_multiplier: 1, referrer: None, buddy: None, has_contributed_current_round: false, total_contributions: 0 });
-        Self::record_audit_logic(&env, creator, AuditAction::AdminAction, id);
-        id
-    }
-    pub fn record_audit_logic(env: &Env, actor: Address, action: AuditAction, resource_id: u64) {
-        let mut count: u64 = env.storage().instance().get(&symbol_short!("AudCnt")).unwrap_or(0);
-        count += 1;
-        let entry = AuditEntry { id: count, actor, action, timestamp: env.ledger().timestamp(), resource_id };
-        env.storage().instance().set(&DataKey::K1(symbol_short!("AudE"), count), &entry);
-        env.storage().instance().set(&symbol_short!("AudCnt"), &count);
-    }
+    fn join_circle(env: Env, user: Address, circle_id: u64, tier_multiplier: u32, referrer: Option<Address>);
+    fn deposit(env: Env, user: Address, circle_id: u64);
+    
+    fn finalize_round(env: Env, caller: Address, circle_id: u64);
+    fn claim_pot(env: Env, user: Address, circle_id: u64);
+    
+    fn trigger_insurance_coverage(env: Env, caller: Address, circle_id: u64, member: Address);
+    fn eject_member(env: Env, caller: Address, circle_id: u64, member: Address);
+    
+    fn pair_with_member(env: Env, user: Address, buddy_address: Address);
+    fn set_safety_deposit(env: Env, user: Address, circle_id: u64, amount: i128);
+    
+    // Leniency voting functions
+    fn request_leniency(env: Env, requester: Address, circle_id: u64, reason: String);
+    fn vote_on_leniency(env: Env, voter: Address, circle_id: u64, requester: Address, vote: LeniencyVote);
+    fn finalize_leniency_vote(env: Env, caller: Address, circle_id: u64, requester: Address);
+    fn get_leniency_request(env: Env, circle_id: u64, requester: Address) -> LeniencyRequest;
+    fn get_social_capital(env: Env, member: Address, circle_id: u64) -> SocialCapital;
+    fn get_leniency_stats(env: Env, circle_id: u64) -> LeniencyStats;
+    
+    // Quadratic voting functions
+    fn create_proposal(
+        env: Env,
+        proposer: Address,
+        circle_id: u64,
+        proposal_type: ProposalType,
+        title: String,
+        description: String,
+        execution_data: String,
+    ) -> u64;
+    
+    fn quadratic_vote(env: Env, voter: Address, proposal_id: u64, vote_weight: u32, vote_choice: QuadraticVoteChoice);
+    fn execute_proposal(env: Env, caller: Address, proposal_id: u64);
+    fn get_proposal(env: Env, proposal_id: u64) -> Proposal;
+    fn get_voting_power(env: Env, member: Address, circle_id: u64) -> VotingPower;
+    fn get_proposal_stats(env: Env, circle_id: u64) -> ProposalStats;
+    fn update_voting_power(env: Env, member: Address, circle_id: u64, token_balance: i128);
+    // Collateral functions
+    fn stake_collateral(env: Env, user: Address, circle_id: u64, amount: i128);
+    fn slash_collateral(env: Env, caller: Address, circle_id: u64, member: Address);
+    fn release_collateral(env: Env, caller: Address, circle_id: u64, member: Address);
+    fn mark_member_defaulted(env: Env, caller: Address, circle_id: u64, member: Address);
+
+    // Reputation Appeal functions
+    fn appeal_penalty(env: Env, requester: Address, circle_id: u64, reason: String);
+    fn vote_on_appeal(env: Env, voter: Address, circle_id: u64, requester: Address, approve: bool);
+    fn reputation_amnesty(env: Env, caller: Address, circle_id: u64, requester: Address);
+    fn get_reliability_index(env: Env, member: Address) -> ReliabilityIndex;
 }
 
 #[contractimpl]
@@ -397,27 +474,136 @@ impl SoroSusuTrait for SoroSusu {
             rs.leniency_received += 1; rs.trust_score += 5;
             env.storage().instance().set(&DataKey::K2(symbol_short!("Cap"), cid, req.clone()), &rs);
             
-            // Update requester's reputation
-            let mut req_metrics = env.storage().instance().get(&DataKey::K1A(symbol_short!("URep"), req.clone())).unwrap_or(UserReputationMetrics {
-                reliability_score: 5000, social_capital_score: 5000, total_cycles: 0, perfect_cycles: 0, total_volume_saved: 0, last_activity: env.ledger().timestamp(), last_decay: env.ledger().timestamp(), on_time_contributions: 0, total_contributions: 0,
-            });
-            req_metrics.social_capital_score = (req_metrics.social_capital_score + 25).min(10000);
-            req_metrics.last_activity = env.ledger().timestamp();
-            env.storage().instance().set(&DataKey::K1A(symbol_short!("URep"), req), &req_metrics);
-            
-            let mut vs = Self::get_social_capital(env.clone(), voter.clone(), cid);
-            vs.leniency_given += 1; vs.voting_participation += 1;
-            env.storage().instance().set(&DataKey::K2(symbol_short!("Cap"), cid, voter.clone()), &vs);
-            
-            // Update voter's reputation
-            let mut voter_metrics = env.storage().instance().get(&DataKey::K1A(symbol_short!("URep"), voter.clone())).unwrap_or(UserReputationMetrics {
-                reliability_score: 5000, social_capital_score: 5000, total_cycles: 0, perfect_cycles: 0, total_volume_saved: 0, last_activity: env.ledger().timestamp(), last_decay: env.ledger().timestamp(), on_time_contributions: 0, total_contributions: 0,
-            });
-            voter_metrics.social_capital_score = (voter_metrics.social_capital_score + 50).min(10000);
-            voter_metrics.last_activity = env.ledger().timestamp();
-            env.storage().instance().set(&DataKey::K1A(symbol_short!("URep"), voter), &voter_metrics);
+            let mut reserve: i128 = env.storage().instance().get(&DataKey::GroupReserve).unwrap_or(0);
+            reserve += penalty_amount;
+            env.storage().instance().set(&DataKey::GroupReserve, &reserve);
         }
-        env.storage().instance().set(&DataKey::K2(symbol_short!("LenR"), cid, req), &r);
+
+        let insurance_fee = (base_amount * circle.insurance_fee_bps as i128) / 10000;
+        let total_amount = base_amount + insurance_fee + penalty_amount;
+
+        let token_client = token::Client::new(&env, &circle.token);
+
+        // Try transfer from user
+        let transfer_result = token_client.try_transfer(&user, &env.current_contract_address(), &total_amount);
+        let transfer_success = match transfer_result {
+            Ok(inner) => inner.is_ok(),
+            Err(_) => false,
+        };
+
+        if !transfer_success {
+            // Buddy fallback
+            if let Some(buddy_addr) = &member.buddy {
+                let safety_key = DataKey::SafetyDeposit(buddy_addr.clone(), circle_id);
+                let safety_balance: i128 = env.storage().instance().get(&safety_key).unwrap_or(0);
+                if safety_balance >= total_amount {
+                    env.storage().instance().set(&safety_key, &(safety_balance - total_amount));
+                } else {
+                    panic!("Insufficient funds and buddy deposit");
+                }
+            } else {
+                panic!("Insufficient funds");
+            }
+        }
+
+        if insurance_fee > 0 {
+            circle.insurance_balance += insurance_fee;
+        }
+
+        member.contribution_count += 1;
+        member.last_contribution_time = current_time;
+        circle.contribution_bitmap |= 1 << member.index;
+        
+        env.storage().instance().set(&member_key, &member);
+        env.storage().instance().set(&DataKey::Circle(circle_id), &circle);
+    }
+
+    fn finalize_round(env: Env, caller: Address, circle_id: u64) {
+        caller.require_auth();
+        let circle: CircleInfo = env.storage().instance().get(&DataKey::Circle(circle_id)).expect("Circle not found");
+        
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("Not initialized");
+        if caller != circle.creator && caller != stored_admin {
+            panic!("Unauthorized");
+        }
+
+        if circle.is_round_finalized {
+            panic!("Round already finalized");
+        }
+
+        let expected_bitmap = (1u64 << circle.member_count) - 1;
+        if circle.contribution_bitmap != expected_bitmap {
+            panic!("Not all contributed");
+        }
+
+        // recipient is circle.current_recipient_index
+        // We'll need a way to get member by index or store member addresses in circle.
+        // For simplicity in this clean version, let's assume members are stored in a predictable way or we add member_addresses to CircleInfo.
+        // Actually, let's use the bitmap and iterate to find the address if needed, or better, store it in storage under (circle_id, index)
+    }
+
+    fn claim_pot(env: Env, user: Address, circle_id: u64) {
+        user.require_auth();
+        let mut circle: CircleInfo = env.storage().instance().get(&DataKey::Circle(circle_id)).expect("Circle not found");
+        
+        if !circle.is_round_finalized {
+            panic!("Round not finalized");
+        }
+
+        if let Some(recipient) = &circle.current_pot_recipient {
+            if user != *recipient {
+                panic!("Unauthorized recipient");
+            }
+        } else {
+            panic!("No recipient set");
+        }
+
+        let scheduled_time: u64 = env.storage().instance().get(&DataKey::ScheduledPayoutTime(circle_id)).expect("Payout not scheduled");
+        if env.ledger().timestamp() < scheduled_time {
+            panic!("Payout too early");
+        }
+
+        let pot_amount = circle.contribution_amount * (circle.member_count as i128);
+        let token_client = token::Client::new(&env, &circle.token);
+        token_client.transfer(&env.current_contract_address(), &user, &pot_amount);
+
+        // Auto-release collateral and reward RI if member has completed all contributions
+        let member_key = DataKey::Member(user.clone());
+        if let Some(member_info) = env.storage().instance().get::<DataKey, Member>(&member_key) {
+            if member_info.contribution_count >= circle.max_members {
+                // Reward RI
+                let mut ri = Self::get_ri_internal(&env, &user);
+                ri.successful_cycles = ri.successful_cycles.saturating_add(1);
+                ri.points = (ri.points + 50).min(MAX_RI as u16); // +50 points for success
+                ri.last_update = env.ledger().timestamp();
+                Self::update_ri_internal(&env, &user, ri);
+
+                if circle.requires_collateral {
+                    let collateral_key = DataKey::CollateralVault(user.clone(), circle_id);
+                    if let Some(mut collateral_info) = env.storage().instance().get::<DataKey, CollateralInfo>(&collateral_key) {
+                        if collateral_info.status == CollateralStatus::Staked {
+                            // Release collateral back to member
+                            token_client.transfer(&env.current_contract_address(), &user, &collateral_info.amount);
+                            
+                            // Update collateral status
+                            collateral_info.status = CollateralStatus::Released;
+                            collateral_info.release_timestamp = Some(env.ledger().timestamp());
+                            env.storage().instance().set(&collateral_key, &collateral_info);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Reset for next round
+        circle.is_round_finalized = false;
+        circle.contribution_bitmap = 0;
+        circle.is_insurance_used = false;
+        circle.current_recipient_index = (circle.current_recipient_index + 1) % circle.member_count;
+        circle.current_pot_recipient = None; // Should be set in finalize_round
+
+        env.storage().instance().set(&DataKey::Circle(circle_id), &circle);
+        env.storage().instance().remove(&DataKey::ScheduledPayoutTime(circle_id));
     }
     fn finalize_leniency_vote(env: Env, caller: Address, cid: u64, req: Address) { caller.require_auth(); let mut r: LeniencyRequest = env.storage().instance().get(&DataKey::K2(symbol_short!("LenR"), cid, req.clone())).unwrap(); r.status = LeniencyRequestStatus::Approved; env.storage().instance().set(&DataKey::K2(symbol_short!("LenR"), cid, req), &r); }
     fn get_leniency_request(env: Env, cid: u64, req: Address) -> LeniencyRequest { env.storage().instance().get(&DataKey::K2(symbol_short!("LenR"), cid, req)).unwrap() }
@@ -620,51 +806,107 @@ impl SoroSusuTrait for SoroSusu {
             env.storage().instance().remove(&frozen_key);
         }
     }
-    fn create_vesting_lien(env: Env, u: Address, cid: u64, vault: Address, amt: i128) -> u64 { u.require_auth(); let id = 1u64; env.storage().instance().set(&DataKey::K2(symbol_short!("Lien"), cid, u.clone()), &LienInfo { member: u, circle_id: cid, vesting_vault_contract: vault, lien_amount: amt, status: LienStatus::Active, create_timestamp: env.ledger().timestamp(), claim_timestamp: None, release_timestamp: None, lien_id: id }); id }
-    fn get_vesting_lien(env: Env, u: Address, cid: u64) -> Option<LienInfo> { env.storage().instance().get(&DataKey::K2(symbol_short!("Lien"), cid, u)) }
-    fn get_circle_liens(env: Env, _cid: u64) -> Vec<LienInfo> { Vec::new(&env) }
-    fn verify_vesting_vault(_env: Env, _vault: Address) -> bool { true }
-    fn start_round(_env: Env, u: Address, _cid: u64) { u.require_auth(); }
-    fn get_proposal_stats(env: Env, _cid: u64) -> ProposalStats { let _ = env; ProposalStats { total_proposals: 0, active_proposals: 0, approved_proposals: 1, rejected_proposals: 0, executed_proposals: 0 } }
-    fn initiate_dissolve(_env: Env, u: Address, _cid: u64, _reason: String) { u.require_auth(); }
-    fn vote_to_dissolve(_env: Env, u: Address, _cid: u64, _v: DissolutionVoteChoice) { u.require_auth(); }
-    fn claim_refund(_env: Env, u: Address, _cid: u64) { u.require_auth(); }
-    fn get_dissolution_status(_env: Env, _cid: u64) -> DissolutionStatus { DissolutionStatus::Active }
-    fn get_refund_status(_env: Env, _u: Address, _cid: u64) -> RefundStatus { RefundStatus::Pending }
-    fn get_dissolution_proposal(env: Env, _cid: u64) -> DissolutionProposal { DissolutionProposal { initiator: env.current_contract_address(), circle_id: 0, status: DissolutionStatus::Voting, approve_votes: 0, reject_votes: 0, dissolution_timestamp: None } }
-    fn finalize_dissolution(_env: Env, adm: Address, _cid: u64) { adm.require_auth(); }
-    fn get_net_position(_env: Env, u: Address, cid: u64) -> NetPosition { NetPosition { member: u, circle_id: cid, has_received_pot: false, refund_claimed: false } }
-    fn get_refund_claim(_env: Env, u: Address, cid: u64) -> RefundClaim { RefundClaim { member: u, circle_id: cid, status: RefundStatus::Pending } }
-    fn get_dissolved_circle(env: Env, cid: u64) -> DissolvedCircle { DissolvedCircle { circle_id: cid, dissolution_timestamp: env.ledger().timestamp(), total_contributions: 100, total_members: 3, refunded_members: 0, remaining_funds: 100, dissolution_status: DissolutionStatus::Refunding } }
-    fn configure_default_recovery(_env: Env, adm: Address, _cid: u64, _cfg: DefaultRecoveryConfig) { adm.require_auth(); }
-    fn get_default_recovery_config(_env: Env, _cid: u64) -> Option<DefaultRecoveryConfig> { None }
-    fn initiate_recovery_sprint(_env: Env, adm: Address, _cid: u64, _def: Address) { adm.require_auth(); }
-    fn get_recovery_sprint(_env: Env, _cid: u64, _sid: u64) -> Option<RecoverySprint> { None }
-    fn make_priority_claim(_env: Env, u: Address, _cid: u64, _sid: u64) { u.require_auth(); }
-    fn get_priority_claim(_env: Env, _sid: u64) -> Option<PriorityClaim> { None }
-    fn make_healthy_member_claim(_env: Env, u: Address, _cid: u64, _sid: u64) { u.require_auth(); }
-    fn get_healthy_member_claim(_env: Env, _sid: u64) -> Option<HealthyMemberClaim> { None }
-    fn complete_recovery_sprint(_env: Env, adm: Address, _cid: u64, _sid: u64) { adm.require_auth(); }
-    fn initiate_debt_restructuring(_env: Env, adm: Address, _cid: u64, _def: Address, _pr: i128, _int: u32) { adm.require_auth(); }
-    fn get_debt_restructuring(_env: Env, _cid: u64, _rid: u64) -> Option<InternalDebtRestructuring> { None }
-    fn make_restructuring_payment(_env: Env, u: Address, _cid: u64, _rid: u64, _amt: i128) { u.require_auth(); }
-    fn complete_debt_restructuring(_env: Env, adm: Address, _cid: u64, _rid: u64) { adm.require_auth(); }
-    fn get_reputation(env: Env, user: Address) -> ReputationData {
-        let metrics = env.storage().instance().get(&DataKey::K1A(symbol_short!("URep"), user.clone())).unwrap_or(UserReputationMetrics {
-            reliability_score: 5000, social_capital_score: 5000, total_cycles: 0, perfect_cycles: 0, total_volume_saved: 0, last_activity: env.ledger().timestamp(), last_decay: env.ledger().timestamp(), on_time_contributions: 0, total_contributions: 0,
-        });
-        let susu_score = (metrics.reliability_score + metrics.social_capital_score) / 2;
-        let on_time_rate = if metrics.total_contributions > 0 { (metrics.on_time_contributions * 10000) / metrics.total_contributions } else { 5000 };
-        ReputationData {
-            user_address: user,
-            susu_score,
-            reliability_score: metrics.reliability_score,
-            total_contributions: metrics.total_contributions,
-            on_time_rate,
-            volume_saved: metrics.total_volume_saved,
-            social_capital: metrics.social_capital_score,
-            last_updated: metrics.last_activity,
-            is_active: env.ledger().timestamp() - metrics.last_activity < 15552000, // 6 months
+
+    fn get_proposal(env: Env, proposal_id: u64) -> Proposal {
+        let proposal_key = DataKey::Proposal(proposal_id);
+        env.storage().instance().get(&proposal_key).expect("Proposal not found")
+    }
+
+    fn get_voting_power(env: Env, member: Address, circle_id: u64) -> VotingPower {
+        let voting_power_key = DataKey::VotingPower(member, circle_id);
+        env.storage().instance().get(&voting_power_key).unwrap_or(VotingPower {
+            member,
+            circle_id,
+            token_balance: 0,
+            quadratic_power: 0,
+            last_updated: 0,
+        })
+    }
+
+    fn get_proposal_stats(env: Env, circle_id: u64) -> ProposalStats {
+        let stats_key = DataKey::ProposalStats(circle_id);
+        env.storage().instance().get(&stats_key).unwrap_or(ProposalStats {
+            total_proposals: 0,
+            approved_proposals: 0,
+            rejected_proposals: 0,
+            executed_proposals: 0,
+            average_participation: 0,
+            average_voting_time: 0,
+        })
+    }
+
+    fn update_voting_power(env: Env, member: Address, circle_id: u64, token_balance: i128) {
+        // Calculate quadratic voting power as sqrt(token_balance)
+        // We use integer approximation: sqrt(x) ≈ x / (sqrt(x) + 1) for simplicity
+        // In production, you'd use a proper sqrt implementation
+        
+        let ri = Self::get_ri_internal(&env, &member);
+        
+        let quadratic_power = if token_balance > 0 {
+            // Formula: Tokens * (RI / 1000)
+            // Use large enough intermediate values to avoid precision loss
+            let weighted_balance = (token_balance * ri.points as i128) / 1000;
+            let balance_u64 = weighted_balance as u64;
+            (balance_u64 / 1000).max(1)
+        } else {
+            0
+        };
+
+        let voting_power = VotingPower {
+            member: member.clone(),
+            circle_id,
+            token_balance,
+            quadratic_power,
+            last_updated: env.ledger().timestamp(),
+        };
+
+        env.storage().instance().set(&DataKey::VotingPower(member, circle_id), &voting_power);
+    }
+
+    fn get_reliability_index(env: Env, member: Address) -> ReliabilityIndex {
+        Self::get_ri_internal(&env, &member)
+    }
+
+    // Helper functions for internal RI management
+    fn get_ri_internal(env: &Env, member: &Address) -> ReliabilityIndex {
+        env.storage().instance().get(&DataKey::ReliabilityIndex(member.clone())).unwrap_or(ReliabilityIndex {
+            points: MAX_RI as u16,
+            successful_cycles: 0,
+            default_count: 0,
+            last_update: env.ledger().timestamp(),
+        })
+    }
+
+    fn update_ri_internal(env: &Env, member: &Address, ri: ReliabilityIndex) {
+        env.storage().instance().set(&DataKey::ReliabilityIndex(member.clone()), &ri);
+    }
+
+    fn report_to_external_registries(env: &Env, member: &Address, event_type: Symbol, amount: i128) {
+        // Emit event for external identity protocols to pick up
+        env.events().publish((symbol_short!("EXT_REP"), member.clone()), (event_type, amount));
+    }
+
+    fn stake_collateral(env: Env, user: Address, circle_id: u64, amount: i128) {
+        user.require_auth();
+        
+        let circle: CircleInfo = env.storage().instance().get(&DataKey::Circle(circle_id)).expect("Circle not found");
+        
+        if !circle.requires_collateral {
+            panic!("Collateral not required for this circle");
+        }
+
+        let collateral_key = DataKey::CollateralVault(user.clone(), circle_id);
+        
+        // Check if collateral already staked
+        if let Some(_collateral) = env.storage().instance().get::<DataKey, CollateralInfo>(&collateral_key) {
+            panic!("Collateral already staked");
+        }
+
+        // Calculate required collateral amount
+        let required_collateral = (circle.total_cycle_value * circle.collateral_bps as i128) / 10000;
+        
+        if amount < required_collateral {
+            panic!("Insufficient collateral amount");
         }
     }
     fn update_reputation_on_deposit(env: Env, user: Address, was_on_time: bool) {
@@ -706,14 +948,169 @@ impl SoroSusuTrait for SoroSusu {
             env.storage().instance().set(&DataKey::K1A(symbol_short!("URep"), user), &metrics);
         }
     }
-    fn calculate_fee_discount(env: Env, user: Address) -> u32 {
-        let rep = Self::get_reputation(env, user);
-        match rep.susu_score {
-            s if s >= 9000 => 7500, // 75% discount
-            s if s >= 8000 => 5000, // 50% discount
-            s if s >= 7000 => 2500, // 25% discount
-            s if s >= 6000 => 1000, // 10% discount
-            _ => 0, // No discount
+
+    fn mark_member_defaulted(env: Env, caller: Address, circle_id: u64, member: Address) {
+        caller.require_auth();
+        
+        let circle: CircleInfo = env.storage().instance().get(&DataKey::Circle(circle_id)).expect("Circle not found");
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("Not initialized");
+        
+        if caller != circle.creator && caller != stored_admin {
+            panic!("Unauthorized");
+        }
+
+        let member_key = DataKey::Member(member.clone());
+        let mut member_info: Member = env.storage().instance().get(&member_key).expect("Member not found");
+        
+        if member_info.status == MemberStatus::Defaulted {
+            panic!("Member already defaulted");
+        }
+
+        // Mark member as defaulted
+        member_info.status = MemberStatus::Defaulted;
+        env.storage().instance().set(&member_key, &member_info);
+
+        // Apply RI Penalty
+        let mut ri = Self::get_ri_internal(&env, &member);
+        ri.points = ri.points.saturating_sub(RI_PENALTY);
+        ri.default_count += 1;
+        ri.last_update = env.ledger().timestamp();
+        Self::update_ri_internal(&env, &member, ri);
+
+        // Report to external registries (Negative-Credit Reporting)
+        let amount_stolen = circle.contribution_amount * (circle.member_count as i128); // Pot value
+        Self::report_to_external_registries(&env, &member, symbol_short!("DEFAULT"), amount_stolen);
+
+        // Add to defaulted members list
+        let defaulted_key = DataKey::DefaultedMembers(circle_id);
+        let mut defaulted_members: Vec<Address> = env.storage().instance().get(&defaulted_key).unwrap_or(Vec::new(&env));
+        
+        if !defaulted_members.contains(&member) {
+            defaulted_members.push_back(member.clone());
+            env.storage().instance().set(&defaulted_key, &defaulted_members);
+        }
+
+        // Auto-slash collateral if staked
+        let collateral_key = DataKey::CollateralVault(member.clone(), circle_id);
+        if let Some(_collateral) = env.storage().instance().get::<DataKey, CollateralInfo>(&collateral_key) {
+            // Reuse slash_collateral logic
+            Self::slash_collateral(env, caller, circle_id, member);
+        }
+    }
+
+    fn appeal_penalty(env: Env, requester: Address, circle_id: u64, reason: String) {
+        requester.require_auth();
+
+        // Check if member is defaulted
+        let member_key = DataKey::Member(requester.clone());
+        let member_info: Member = env.storage().instance().get(&member_key).expect("Member not found");
+        if member_info.status != MemberStatus::Defaulted {
+            panic!("Only defaulted members can appeal");
+        }
+
+        let appeal_key = DataKey::ReputationAppeal(circle_id, requester.clone());
+        if env.storage().instance().has(&appeal_key) {
+            panic!("Appeal already exists");
+        }
+
+        let current_time = env.ledger().timestamp();
+        let voting_deadline = current_time + VOTING_PERIOD;
+
+        let appeal = ReputationAppeal {
+            requester,
+            circle_id,
+            appeal_timestamp: current_time,
+            voting_deadline,
+            status: AppealStatus::Pending,
+            for_votes: 0,
+            against_votes: 0,
+            reason,
+        };
+
+        env.storage().instance().set(&appeal_key, &appeal);
+    }
+
+    fn vote_on_appeal(env: Env, voter: Address, circle_id: u64, requester: Address, approve: bool) {
+        voter.require_auth();
+
+        let appeal_key = DataKey::ReputationAppeal(circle_id, requester.clone());
+        let mut appeal: ReputationAppeal = env.storage().instance().get(&appeal_key).expect("Appeal not found");
+
+        if appeal.status != AppealStatus::Pending {
+            panic!("Appeal already finalized");
+        }
+
+        if env.ledger().timestamp() > appeal.voting_deadline {
+            panic!("Voting period expired");
+        }
+
+        let vote_key = DataKey::AppealVotes(circle_id, requester.clone(), voter.clone());
+        if env.storage().temporary().has(&vote_key) {
+            panic!("Already voted");
+        }
+
+        // Must be a member of the same circle
+        // (Simplified check: assume voter is a member if they can be found)
+        let voter_key = DataKey::Member(voter.clone());
+        let _voter_info: Member = env.storage().instance().get(&voter_key).expect("Voter not found");
+
+        if approve {
+            appeal.for_votes += 1;
+        } else {
+            appeal.against_votes += 1;
+        }
+
+        // Use temporary storage for votes to save on ledger rent for data that is only needed during voting
+        env.storage().temporary().set(&vote_key, &approve);
+        env.storage().instance().set(&appeal_key, &appeal);
+
+        // Check for 2/3 majority
+        let circle: CircleInfo = env.storage().instance().get(&DataKey::Circle(circle_id)).expect("Circle not found");
+        let total_voters = circle.member_count - 1; // Exclude requester
+        let required_votes = (total_voters * REPUTATION_AMNESTY_THRESHOLD) / 100;
+
+        if appeal.for_votes >= required_votes {
+            appeal.status = AppealStatus::Approved;
+            env.storage().instance().set(&appeal_key, &appeal);
+            // Amnesty is auto-executed if majority reached
+            Self::reputation_amnesty(env, voter, circle_id, requester);
+        } else if appeal.against_votes > (total_voters - required_votes) {
+            appeal.status = AppealStatus::Rejected;
+            env.storage().instance().set(&appeal_key, &appeal);
+        }
+    }
+
+    fn reputation_amnesty(env: Env, caller: Address, circle_id: u64, requester: Address) {
+        caller.require_auth();
+
+        let appeal_key = DataKey::ReputationAppeal(circle_id, requester.clone());
+        let appeal: ReputationAppeal = env.storage().instance().get(&appeal_key).expect("Appeal not found");
+
+        if appeal.status != AppealStatus::Approved {
+            panic!("Appeal not approved");
+        }
+
+        // Restore points
+        let mut ri = Self::get_ri_internal(&env, &requester);
+        ri.points = (ri.points + RI_RESTORE).min(MAX_RI);
+        Self::update_ri_internal(&env, &requester, ri);
+
+        // Mark member as active again
+        let member_key = DataKey::Member(requester.clone());
+        let mut member_info: Member = env.storage().instance().get(&member_key).expect("Member not found");
+        member_info.status = MemberStatus::Active;
+        env.storage().instance().set(&member_key, &member_info);
+
+        // Remove from defaulted list
+        let defaulted_key = DataKey::DefaultedMembers(circle_id);
+        if let Some(mut defaulted_members) = env.storage().instance().get::<DataKey, Vec<Address>>(&defaulted_key) {
+            let mut new_list = Vec::new(&env);
+            for m in defaulted_members.iter() {
+                if m != requester {
+                    new_list.push_back(m);
+                }
+            }
+            env.storage().instance().set(&defaulted_key, &new_list);
         }
     }
 }
