@@ -8,6 +8,12 @@ use soroban_sdk::{
 pub mod dispute;
 pub mod yield_allocation_voting;
 pub mod yield_strategy_trait;
+// Issue #323: VRF-based juror selection for global dispute resolution.
+pub mod juror_selection;
+
+// Issue #321: Maximum cycle duration cap (2 years in seconds) to prevent
+// integer overflow exploits and unbounded storage accumulation.
+pub const MAX_CYCLE_DURATION: u64 = 2 * 365 * 24 * 60 * 60; // 63,072,000 seconds
 
 // --- DATA STRUCTURES ---
 
@@ -47,6 +53,20 @@ pub enum DataKey {
     DisputeCount,
     Dispute(u64),
 }
+
+/// Issue #324: Record stored in the PendingSlash vault.
+#[contracttype]
+#[derive(Clone)]
+pub struct PendingSlashRecord {
+    /// Amount of collateral held in the vault (in token stroops).
+    pub amount: u64,
+    /// Ledger timestamp at which the slash was recorded.
+    pub slashed_at: u64,
+}
+
+/// 72 hours in seconds — the mandatory appeals window before slashed collateral
+/// can be redistributed to victims (Issue #324).
+pub const APPEALS_TIMELOCK_SECS: u64 = 72 * 60 * 60; // 259_200
 
 #[contracttype]
 #[derive(Clone)]
@@ -120,6 +140,15 @@ pub trait SoroSusuTrait {
 
     // Execute default on member (after grace period expires)
     fn execute_default(env: Env, circle_id: u64, member: Address) -> Result<(), u32>;
+
+    // Issue #324: Move slashed collateral into the 72-hour pending vault.
+    // Only callable by admin. Returns Err(405) if member has no collateral to slash.
+    fn slash_collateral(env: Env, circle_id: u64, member: Address) -> Result<(), u32>;
+
+    // Issue #324: Redistribute pending-slash funds to the group reserve after the
+    // 72-hour appeals window has elapsed. Returns Err(406) if the timelock has not
+    // yet expired, giving the penalised member time to appeal to the DAO.
+    fn release_pending_slash(env: Env, circle_id: u64, member: Address) -> Result<(), u32>;
 
     // NEW: Issue #287
     fn route_to_yield(env: Env, circle_id: u64, amount: u64, pool_address: Address);
@@ -291,6 +320,11 @@ impl SoroSusuTrait for SoroSusu {
         grace_period: u64,
         late_fee_bps: u32,
     ) -> u64 {
+        // Issue #321: Enforce MAX_CYCLE_DURATION cap to prevent overflow exploits.
+        if cycle_duration > MAX_CYCLE_DURATION {
+            panic!("cycle_duration exceeds MAX_CYCLE_DURATION");
+        }
+
         // 1. Get the current Circle Count
         let mut circle_count: u64 = env
             .storage()
@@ -583,6 +617,90 @@ impl SoroSusuTrait for SoroSusu {
         //    - Notify other members
 
         // For now, we'll just mark them as defaulted
+        Ok(())
+    }
+
+    // Issue #324: Slash collateral — move the defaulted member's collateral into
+    // the 72-hour pending vault so they have time to appeal before redistribution.
+    fn slash_collateral(env: Env, circle_id: u64, member: Address) -> Result<(), u32> {
+        // Only admin may initiate a slash.
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).ok_or(401u32)?;
+        admin.require_auth();
+
+        // Member must be marked as defaulted.
+        let defaulted_key = DataKey::DefaultedMember(circle_id, member.clone());
+        if !env.storage().instance().has(&defaulted_key) {
+            return Err(405); // Member has not defaulted — nothing to slash.
+        }
+
+        // Retrieve the member's collateral from the group reserve as a proxy.
+        // In a full implementation this would pull from a per-member collateral vault.
+        let mut reserve: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GroupReserve)
+            .unwrap_or(0);
+
+        // Use the circle's contribution amount as the slash amount (simplified model).
+        let circle: CircleInfo = env
+            .storage()
+            .instance()
+            .get(&DataKey::Circle(circle_id))
+            .ok_or(401u32)?;
+        let slash_amount = circle.contribution_amount;
+
+        if reserve < slash_amount {
+            return Err(405); // Insufficient collateral to slash.
+        }
+
+        // Deduct from reserve and place in the pending vault.
+        reserve -= slash_amount;
+        env.storage().instance().set(&DataKey::GroupReserve, &reserve);
+
+        let record = PendingSlashRecord {
+            amount: slash_amount,
+            slashed_at: env.ledger().timestamp(),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingSlash(circle_id, member), &record);
+
+        Ok(())
+    }
+
+    // Issue #324: Release pending-slash funds to the group reserve after the
+    // 72-hour appeals window has elapsed.
+    fn release_pending_slash(env: Env, circle_id: u64, member: Address) -> Result<(), u32> {
+        let record: PendingSlashRecord = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingSlash(circle_id, member.clone()))
+            .ok_or(405u32)?; // No pending slash for this member.
+
+        let current_time = env.ledger().timestamp();
+        let release_time = record
+            .slashed_at
+            .checked_add(APPEALS_TIMELOCK_SECS)
+            .ok_or(405u32)?;
+
+        if current_time < release_time {
+            return Err(406); // Timelock has not yet expired — appeal window still open.
+        }
+
+        // Timelock expired: redistribute to group reserve.
+        let mut reserve: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GroupReserve)
+            .unwrap_or(0);
+        reserve = reserve.saturating_add(record.amount);
+        env.storage().instance().set(&DataKey::GroupReserve, &reserve);
+
+        // Remove the pending slash record.
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingSlash(circle_id, member));
+
         Ok(())
     }
 
@@ -914,6 +1032,36 @@ impl SoroSusuTrait for SoroSusu {
                 // Verify member is part of the circle
                 let member_key = DataKey::Member(member_address.clone());
                 if env.storage().instance().has(&member_key) {
+                    // Issue #320: Pre-flight trustline check.
+                    // Attempt to verify the recipient has a trustline for the circle token.
+                    // On Stellar, a transfer to an address without a trustline will fail.
+                    // We detect this by checking if the member has ever interacted with the
+                    // token (contribution_count > 0 implies they deposited, so trustline exists).
+                    // For new/external recipients, we hold funds and emit MissingTrustline.
+                    let member_data: Member = env
+                        .storage()
+                        .instance()
+                        .get(&member_key)
+                        .unwrap();
+                    let has_trustline = member_data.contribution_count > 0;
+
+                    if !has_trustline {
+                        // Hold funds: mark this member's payout as pending trustline resolution.
+                        env.storage().instance().set(
+                            &DataKey::MissingTrustline(circle_id, member_address.clone()),
+                            &yield_per_member,
+                        );
+                        // Emit MissingTrustline event so off-chain systems can notify the member.
+                        env.events().publish(
+                            (Symbol::new(&env, "MissingTrustline"),),
+                            (circle_id, member_address.clone(), yield_per_member),
+                        );
+                        // Skip crediting this member; do NOT increment members_processed
+                        // so the group's execution flow is not blocked.
+                        progress.last_processed_index = i + 1;
+                        continue;
+                    }
+
                     // Get current yield balance for this member
                     let yield_key = DataKey::YieldBalance(circle_id, member_address.clone());
                     let current_balance: i128 =
