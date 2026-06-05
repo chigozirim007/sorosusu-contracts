@@ -1,6 +1,15 @@
-use soroban_sdk::{Address, Env, String, Symbol};
+use soroban_sdk::{contract, contractimpl, Address, Env, String};
 use soroban_sdk::testutils::{Address as _, Ledger};
-use sorosusu_contracts::{SoroSusu, SoroSusuClient, DataKey, LeniencyVote, LeniencyRequestStatus, MemberStatus};
+use sorosusu_contracts::{SoroSusu, SoroSusuClient, DataKey, LeniencyVote, LeniencyRequestStatus};
+
+#[contract]
+pub struct MockNft;
+
+#[contractimpl]
+impl MockNft {
+    pub fn mint(_env: Env, _to: Address, _id: u128) {}
+    pub fn burn(_env: Env, _from: Address, _id: u128) {}
+}
 
 #[test]
 fn test_request_leniency() {
@@ -13,7 +22,7 @@ fn test_request_leniency() {
     let creator = Address::generate(&env);
     let requester = Address::generate(&env);
     let token = Address::generate(&env);
-    let nft_contract = Address::generate(&env);
+    let nft_contract = env.register_contract(None, MockNft);
     
     // Initialize contract
     client.init(&admin);
@@ -60,7 +69,7 @@ fn test_vote_on_leniency_approval() {
     let voter2 = Address::generate(&env);
     let voter3 = Address::generate(&env);
     let token = Address::generate(&env);
-    let nft_contract = Address::generate(&env);
+    let nft_contract = env.register_contract(None, MockNft);
     
     // Initialize contract
     client.init(&admin);
@@ -117,7 +126,7 @@ fn test_vote_on_leniency_rejection() {
     let voter2 = Address::generate(&env);
     let voter3 = Address::generate(&env);
     let token = Address::generate(&env);
-    let nft_contract = Address::generate(&env);
+    let nft_contract = env.register_contract(None, MockNft);
     
     // Initialize contract
     client.init(&admin);
@@ -165,7 +174,7 @@ fn test_cannot_vote_for_own_request() {
     let creator = Address::generate(&env);
     let requester = Address::generate(&env);
     let token = Address::generate(&env);
-    let nft_contract = Address::generate(&env);
+    let nft_contract = env.register_contract(None, MockNft);
     
     // Initialize contract
     client.init(&admin);
@@ -207,7 +216,7 @@ fn test_double_voting_prevention() {
     let requester = Address::generate(&env);
     let voter = Address::generate(&env);
     let token = Address::generate(&env);
-    let nft_contract = Address::generate(&env);
+    let nft_contract = env.register_contract(None, MockNft);
     
     // Initialize contract
     client.init(&admin);
@@ -253,7 +262,7 @@ fn test_social_capital_tracking() {
     let requester = Address::generate(&env);
     let voter = Address::generate(&env);
     let token = Address::generate(&env);
-    let nft_contract = Address::generate(&env);
+    let nft_contract = env.register_contract(None, MockNft);
     
     // Initialize contract
     client.init(&admin);
@@ -306,7 +315,7 @@ fn test_leniency_stats_tracking() {
     let voter1 = Address::generate(&env);
     let voter2 = Address::generate(&env);
     let token = Address::generate(&env);
-    let nft_contract = Address::generate(&env);
+    let nft_contract = env.register_contract(None, MockNft);
     
     // Initialize contract
     client.init(&admin);
@@ -361,7 +370,7 @@ fn test_grace_period_prevents_late_fees() {
     let requester = Address::generate(&env);
     let voter = Address::generate(&env);
     let token = Address::generate(&env);
-    let nft_contract = Address::generate(&env);
+    let nft_contract = env.register_contract(None, MockNft);
     
     // Initialize contract
     client.init(&admin);
@@ -411,7 +420,7 @@ fn test_voting_period_expiration() {
     let requester = Address::generate(&env);
     let voter = Address::generate(&env);
     let token = Address::generate(&env);
-    let nft_contract = Address::generate(&env);
+    let nft_contract = env.register_contract(None, MockNft);
     
     // Initialize contract
     client.init(&admin);
@@ -464,7 +473,7 @@ fn test_minimum_participation_requirement() {
     let requester = Address::generate(&env);
     let voter = Address::generate(&env);
     let token = Address::generate(&env);
-    let nft_contract = Address::generate(&env);
+    let nft_contract = env.register_contract(None, MockNft);
     
     // Initialize contract
     client.init(&admin);
