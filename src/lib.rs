@@ -913,13 +913,15 @@ impl SoroSusuTrait for SoroSusu {
 
         // Check if voting should be finalized early (if majority reached)
         let total_possible_votes = (circle.member_count - 1) as u32; // Exclude requester
-        let votes_needed_for_majority = (total_possible_votes * SIMPLE_MAJORITY_THRESHOLD) / 100;
-        
+        // Use ceiling division so e.g. 3 voters requires ceil(3*0.51)=2 votes, not floor=1
+        let votes_needed_for_majority = (total_possible_votes * SIMPLE_MAJORITY_THRESHOLD + 99) / 100;
+
         if request.approve_votes >= votes_needed_for_majority {
             request.status = LeniencyRequestStatus::Approved;
             SoroSusu::finalize_leniency_vote_internal(&env, &circle_id, &requester, &mut request);
         } else if request.reject_votes >= votes_needed_for_majority {
             request.status = LeniencyRequestStatus::Rejected;
+            SoroSusu::finalize_leniency_vote_internal(&env, &circle_id, &requester, &mut request);
         }
 
         env.storage().instance().set(&request_key, &request);
@@ -1489,23 +1491,43 @@ impl SoroSusuTrait for SoroSusu {
 
 impl SoroSusu {
     fn finalize_leniency_vote_internal(env: &Env, circle_id: &u64, requester: &Address, request: &mut LeniencyRequest) {
-        let total_possible_votes = request.total_votes_cast;
-        let minimum_participation = (total_possible_votes * MINIMUM_VOTING_PARTICIPATION) / 100;
-        
+        let total_votes = request.total_votes_cast;
+
+        // If no votes were cast at all, the request has expired with no participation.
+        if total_votes == 0 {
+            request.status = LeniencyRequestStatus::Expired;
+            let stats_key = DataKey::LeniencyStats(*circle_id);
+            let mut stats: LeniencyStats = env.storage().instance().get(&stats_key).unwrap_or(LeniencyStats {
+                total_requests: 0,
+                approved_requests: 0,
+                rejected_requests: 0,
+                expired_requests: 0,
+                average_participation: 0,
+            });
+            stats.expired_requests += 1;
+            env.storage().instance().set(&stats_key, &stats);
+            return;
+        }
+
+        // Guard against divide-by-zero: minimum_participation is at least 1 since total_votes > 0
+        let minimum_participation = (total_votes * MINIMUM_VOTING_PARTICIPATION + 99) / 100;
+
         let mut final_status = LeniencyRequestStatus::Rejected;
-        
-        if request.total_votes_cast >= minimum_participation {
-            let approval_percentage = (request.approve_votes * 100) / request.total_votes_cast;
+
+        if total_votes >= minimum_participation {
+            // Safe: total_votes > 0 is guaranteed by the minimum_participation guard above
+            let approval_percentage = (request.approve_votes * 100) / total_votes;
             if approval_percentage >= SIMPLE_MAJORITY_THRESHOLD {
                 final_status = LeniencyRequestStatus::Approved;
-                
+
                 let circle_key = DataKey::Circle(*circle_id);
                 let mut circle: CircleInfo = env.storage().instance().get(&circle_key).expect("Circle not found");
-                
+
                 let extension_seconds = request.extension_hours * 3600;
-                let new_deadline = circle.deadline_timestamp + extension_seconds;
-                circle.deadline_timestamp = new_deadline;
-                circle.grace_period_end = Some(new_deadline);
+                // Extend the grace period beyond the current deadline without
+                // advancing deadline_timestamp itself, so grace_period_end > deadline_timestamp.
+                let grace_end = circle.deadline_timestamp + extension_seconds;
+                circle.grace_period_end = Some(grace_end);
                 
                 env.storage().instance().set(&circle_key, &circle);
                 

@@ -106,10 +106,14 @@ fn test_vote_on_leniency_approval() {
     assert_eq!(request.reject_votes, 0);
     
     // Verify grace period was applied
+    // Storage must be accessed from within a contract context via env.as_contract
     let circle_key = DataKey::Circle(circle_id);
-    let circle = env.storage().instance().get::<_, sorosusu_contracts::CircleInfo>(&circle_key).unwrap();
-    assert!(circle.grace_period_end.is_some());
-    assert!(circle.grace_period_end.unwrap() > circle.deadline_timestamp);
+    let (grace_period_end_is_some, grace_period_end_val, deadline_timestamp) = env.as_contract(&contract_id, || {
+        let circle = env.storage().instance().get::<_, sorosusu_contracts::CircleInfo>(&circle_key).unwrap();
+        (circle.grace_period_end.is_some(), circle.grace_period_end.unwrap_or(0), circle.deadline_timestamp)
+    });
+    assert!(grace_period_end_is_some);
+    assert!(grace_period_end_val > deadline_timestamp);
 }
 
 #[test]
@@ -399,10 +403,14 @@ fn test_grace_period_prevents_late_fees() {
     env.ledger().set_timestamp(env.ledger().timestamp() + 7200); // 2 hours later
     
     // Verify grace period is active
+    // Storage must be accessed from within a contract context via env.as_contract
     let circle_key = DataKey::Circle(circle_id);
-    let circle = env.storage().instance().get::<_, sorosusu_contracts::CircleInfo>(&circle_key).unwrap();
-    assert!(circle.grace_period_end.is_some());
-    assert!(env.ledger().timestamp() < circle.grace_period_end.unwrap());
+    let (grace_period_end_is_some, grace_period_end_val) = env.as_contract(&contract_id, || {
+        let circle = env.storage().instance().get::<_, sorosusu_contracts::CircleInfo>(&circle_key).unwrap();
+        (circle.grace_period_end.is_some(), circle.grace_period_end.unwrap_or(0))
+    });
+    assert!(grace_period_end_is_some);
+    assert!(env.ledger().timestamp() < grace_period_end_val);
     
     // In a real test with token contracts, deposit would succeed without late fees
     // This test verifies the grace period logic is working
