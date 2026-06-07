@@ -6,6 +6,7 @@ use sorosusu_contracts::{SoroSusu, SoroSusuClient, DataKey, ProposalType, Propos
 #[test]
 fn test_quadratic_voting_enabled_for_large_groups() {
     let env = Env::default();
+    env.mock_all_auths();
     let contract_id = env.register_contract(None, SoroSusu);
     let client = SoroSusuClient::new(&env, &contract_id);
     
@@ -53,6 +54,7 @@ fn test_quadratic_voting_enabled_for_large_groups() {
 #[test]
 fn test_create_proposal() {
     let env = Env::default();
+    env.mock_all_auths();
     let contract_id = env.register_contract(None, SoroSusu);
     let client = SoroSusuClient::new(&env, &contract_id);
     
@@ -106,6 +108,7 @@ fn test_create_proposal() {
 #[test]
 fn test_create_proposal_fails_for_small_groups() {
     let env = Env::default();
+    env.mock_all_auths();
     let contract_id = env.register_contract(None, SoroSusu);
     let client = SoroSusuClient::new(&env, &contract_id);
     
@@ -146,6 +149,7 @@ fn test_create_proposal_fails_for_small_groups() {
 #[test]
 fn test_voting_power_calculation() {
     let env = Env::default();
+    env.mock_all_auths();
     let contract_id = env.register_contract(None, SoroSusu);
     let client = SoroSusuClient::new(&env, &contract_id);
     
@@ -188,6 +192,7 @@ fn test_voting_power_calculation() {
 #[test]
 fn test_quadratic_vote_cost_calculation() {
     let env = Env::default();
+    env.mock_all_auths();
     let contract_id = env.register_contract(None, SoroSusu);
     let client = SoroSusuClient::new(&env, &contract_id);
     
@@ -246,6 +251,7 @@ fn test_quadratic_vote_cost_calculation() {
 #[test]
 fn test_insufficient_voting_power() {
     let env = Env::default();
+    env.mock_all_auths();
     let contract_id = env.register_contract(None, SoroSusu);
     let client = SoroSusuClient::new(&env, &contract_id);
     
@@ -307,6 +313,7 @@ fn test_insufficient_voting_power() {
 #[test]
 fn test_double_voting_prevention() {
     let env = Env::default();
+    env.mock_all_auths();
     let contract_id = env.register_contract(None, SoroSusu);
     let client = SoroSusuClient::new(&env, &contract_id);
     
@@ -365,6 +372,7 @@ fn test_double_voting_prevention() {
 #[test]
 fn test_quorum_requirement() {
     let env = Env::default();
+    env.mock_all_auths();
     let contract_id = env.register_contract(None, SoroSusu);
     let client = SoroSusuClient::new(&env, &contract_id);
     
@@ -430,6 +438,7 @@ fn test_quorum_requirement() {
 #[test]
 fn test_proposal_execution() {
     let env = Env::default();
+    env.mock_all_auths();
     let contract_id = env.register_contract(None, SoroSusu);
     let client = SoroSusuClient::new(&env, &contract_id);
     
@@ -507,6 +516,7 @@ fn test_proposal_execution() {
 #[test]
 fn test_proposal_rejection_insufficient_majority() {
     let env = Env::default();
+    env.mock_all_auths();
     let contract_id = env.register_contract(None, SoroSusu);
     let client = SoroSusuClient::new(&env, &contract_id);
     
@@ -579,6 +589,7 @@ fn test_proposal_rejection_insufficient_majority() {
 #[test]
 fn test_max_vote_weight_enforcement() {
     let env = Env::default();
+    env.mock_all_auths();
     let contract_id = env.register_contract(None, SoroSusu);
     let client = SoroSusuClient::new(&env, &contract_id);
     
