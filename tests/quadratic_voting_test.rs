@@ -21,7 +21,7 @@ fn test_quadratic_voting_enabled_for_large_groups() {
     // Create large group (>= 10 members) - quadratic voting should be enabled
     let circle_id = client.create_circle(
         &creator,
-        &100_000_0, // 100 XLM
+        &60_000_0, // 100 XLM
         &15u32,      // 15 members
         &token,
         &86400u64,
@@ -37,7 +37,7 @@ fn test_quadratic_voting_enabled_for_large_groups() {
     // Create small group (< 10 members) - quadratic voting should be disabled
     let small_circle_id = client.create_circle(
         &creator,
-        &100_000_0,
+        &60_000_0,
         &5u32,       // 5 members
         &token,
         &86400u64,
@@ -70,7 +70,7 @@ fn test_create_proposal() {
     // Create large group
     let circle_id = client.create_circle(
         &creator,
-        &100_000_0,
+        &60_000_0,
         &15u32,
         &token,
         &86400u64,
@@ -124,7 +124,7 @@ fn test_create_proposal_fails_for_small_groups() {
     // Create small group
     let circle_id = client.create_circle(
         &creator,
-        &100_000_0,
+        &60_000_0,
         &5u32, // Small group
         &token,
         &86400u64,
@@ -165,7 +165,7 @@ fn test_voting_power_calculation() {
     // Create circle
     let circle_id = client.create_circle(
         &creator,
-        &100_000_0,
+        &60_000_0,
         &15u32,
         &token,
         &86400u64,
@@ -209,7 +209,7 @@ fn test_quadratic_vote_cost_calculation() {
     // Create large group
     let circle_id = client.create_circle(
         &creator,
-        &100_000_0,
+        &60_000_0,
         &15u32,
         &token,
         &86400u64,
@@ -268,7 +268,7 @@ fn test_insufficient_voting_power() {
     // Create large group
     let circle_id = client.create_circle(
         &creator,
-        &100_000_0,
+        &60_000_0,
         &15u32,
         &token,
         &86400u64,
@@ -330,7 +330,7 @@ fn test_double_voting_prevention() {
     // Create large group
     let circle_id = client.create_circle(
         &creator,
-        &100_000_0,
+        &60_000_0,
         &15u32,
         &token,
         &86400u64,
@@ -390,7 +390,7 @@ fn test_quorum_requirement() {
     // Create large group
     let circle_id = client.create_circle(
         &creator,
-        &100_000_0,
+        &60_000_0,
         &15u32,
         &token,
         &86400u64,
@@ -457,7 +457,7 @@ fn test_proposal_execution() {
     // Create large group
     let circle_id = client.create_circle(
         &creator,
-        &100_000_0,
+        &60_000_0,
         &15u32,
         &token,
         &86400u64,
@@ -534,7 +534,7 @@ fn test_proposal_rejection_insufficient_majority() {
     // Create large group
     let circle_id = client.create_circle(
         &creator,
-        &100_000_0,
+        &60_000_0,
         &15u32,
         &token,
         &86400u64,
@@ -606,7 +606,7 @@ fn test_max_vote_weight_enforcement() {
     // Create large group
     let circle_id = client.create_circle(
         &creator,
-        &100_000_0,
+        &60_000_0,
         &15u32,
         &token,
         &86400u64,
